@@ -62,7 +62,9 @@ necessary. `401` means it's on.
 If you want to see it from the deployment rather than infer it:
 
 Tilt runs NVKE as Deployment `nvke-controller` in namespace `nvke-controller`. On a
-site that still runs it under the old name, use `cloud-workflow-engine` for both.
+site that still runs it under an older name, use that name for both:
+`nke-controller` for a site installed before the `nvke` rename,
+`cloud-workflow-engine` for anything older.
 
 ```bash
 kubectl -n nvke-controller get deploy nvke-controller \
@@ -288,9 +290,10 @@ all 4 checks passed
 every controller API command mints the same identity this page uses (`nke-clients/nke-client`)
 with the first audience of `apiAuth` in ConfigMap `nvke-controller-config` when
 that section is enabled, and otherwise with the audience from ConfigMap
-`nvke-auth-config`. Each is read from namespace `nvke-controller`, then
-`nke-controller`, then `cloud-workflow-engine`. There is no `NKECTL_DEV_TOKEN`
-and no `hack/nvke-token.sh` step.
+`nvke-auth-config`. Each is read from namespace `nvke-controller`, then from
+`nke-controller` for a site installed before the `nvke` rename, then from
+`cloud-workflow-engine`. There is no `NKECTL_DEV_TOKEN` and no
+`hack/nvke-token.sh` step.
 
 Those names are fixed in the CLI. A cluster-admin kubeconfig (Tilt's kind
 cluster) can mint without extra RBAC. On a real site, grant the kubeconfig

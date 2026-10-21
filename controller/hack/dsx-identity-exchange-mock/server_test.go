@@ -138,7 +138,7 @@ func TestUnit_TokenExchangeSignsNodeAgentIdentity(t *testing.T) {
 		ID:     spiffeid.RequireFromString("spiffe://capd.nke.local/tenant/nke/service/node-agent/bm/" + nodeID),
 		Expiry: now.Add(10 * time.Minute),
 		Claims: map[string]any{
-			"aud": "nvke-controller",
+			"aud": "nke-controller",
 			"exp": now.Add(10 * time.Minute).Unix(),
 		},
 	}})
@@ -157,7 +157,7 @@ func TestUnit_TokenExchangeSignsNodeAgentIdentity(t *testing.T) {
 	var claims map[string]any
 	require.NoError(t, parsed.Claims(server.publicKey.Key, &claims))
 	require.Equal(t, "https://capd.dsx.nvid.id", claims["iss"])
-	require.Equal(t, "nvke-controller", claims["aud"])
+	require.Equal(t, "nke-controller", claims["aud"])
 	require.Equal(t, "spiffe://nke.capd.node-agent.nvid.id/bm/"+nodeID, claims["sub"])
 }
 
