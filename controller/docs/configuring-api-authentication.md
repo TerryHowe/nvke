@@ -41,9 +41,10 @@ CHART=...   # your NVKE chart reference
 helm show values "$CHART" | grep apiAuth
 ```
 
-On an existing site, where the controller runs as `cloud-workflow-engine`,
-replace `nvke-controller` with `cloud-workflow-engine` in every command on this
-page.
+On an existing site, the controller runs under the name it was installed with:
+`nke-controller` for a site installed before the `nvke` rename,
+`cloud-workflow-engine` for anything older. Replace `nvke-controller` with that
+name in every command on this page.
 
 The commands below use `$NS` for the namespace NVKE runs in:
 

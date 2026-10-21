@@ -400,8 +400,9 @@ bearer token to it, so use it from a trusted network only.
 
 That kubeconfig is also how `nvkectl` authenticates to CWE once the site has API
 authentication on. The CLI always mints for `nke-clients/nke-client` and reads
-the audience from ConfigMap `nvke-auth-config` in namespace `nvke-controller`, or
-in `cloud-workflow-engine` when that is absent. Create that service
+the audience from ConfigMap `nvke-auth-config` in namespace `nvke-controller`,
+then in `nke-controller` for a site installed before the `nvke` rename, then in
+`cloud-workflow-engine`, and uses the first it can read. Create that service
 account, admit it, and grant the kubeconfig identity the permissions in
 [Configuring NVKE API Authentication](../controller/docs/configuring-api-authentication.md).
 Without them, `get clusters` fails at minting or CWE returns 403.
