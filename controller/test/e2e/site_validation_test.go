@@ -64,7 +64,7 @@ var siteNamespaces = []siteNamespace{
 	// agent and CSI driver here, so no deploy path file names it as a release.
 	{name: "spire-system", source: "the spire chart's layout for its agent"},
 	{name: "nktp", source: "deploy path item nktp"},
-	// NVKE_CONTROLLER_NAMESPACE where the controller is not in nke-controller,
+	// NVKE_CONTROLLER_NAMESPACE where the controller is not in nvke-controller,
 	// as for every other check that finds it.
 	{name: controller.Namespace(), source: "deploy path item controller"},
 }
