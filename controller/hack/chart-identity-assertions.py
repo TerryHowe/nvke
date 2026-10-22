@@ -186,7 +186,7 @@ def render(chart: str, release: str, values_file: pathlib.Path | None = None, se
 
 
 def spiffe_subjects(rbac_config_map: dict) -> set[str]:
-    """Return the spiffe:// subjects of the ClusterRoleBindings the nke-rbac ConfigMap carries."""
+    """Return the spiffe:// subjects of the ClusterRoleBindings the RBAC ConfigMap carries."""
     return {
         s["name"]
         for d in yaml.safe_load_all(rbac_config_map["data"]["manifest.yaml"])
@@ -232,14 +232,14 @@ def check_scenario(chart: str, sc: Scenario) -> list[str]:
         if doc.get("kind") not in ("ConfigMap", "Role", "RoleBinding"):
             continue
         name = doc["metadata"]["name"]
-        if not (name == "nke-rbac" or name.endswith("-nke-rbac")):
+        if not (name == sc.rbac_name or name.endswith(f"-{sc.rbac_name}")):
             continue
         got = doc["metadata"].get("namespace")
         if got != sc.namespace:
             failures.append(f"{doc['kind']} {name} is in namespace {got!r}, expected {sc.namespace!r}")
 
-    # The nke-rbac ConfigMap renders only when spiffe.trustDomain is set.
-    rbac = [d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "nke-rbac"]
+    # The RBAC ConfigMap renders only when spiffe.trustDomain is set.
+    rbac = [d for d in docs if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == sc.rbac_name]
     if rbac:
         subjects = spiffe_subjects(rbac[0])
         stale = sorted(s for s in subjects if f"/{sc.spiffe_segment}/" not in s)
@@ -258,6 +258,11 @@ def check_scenario(chart: str, sc: Scenario) -> list[str]:
         failures.append(
             f"managementNamespace is {config.get('managementNamespace')!r}, expected {sc.namespace!r}; "
             "the controller would address a namespace the chart did not grant it"
+        )
+    if config.get("rbacConfigMapName") != sc.rbac_name:
+        failures.append(
+            f"rbacConfigMapName is {config.get('rbacConfigMapName')!r}, expected {sc.rbac_name!r}; "
+            "the controller would read a ConfigMap the chart did not render"
         )
     teleport = config.get("teleport") or {}
     for key, want in sc.teleport.items():
