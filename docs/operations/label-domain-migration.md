@@ -57,12 +57,16 @@ sign is a node that needed recycling and did not get it.
 
 The manifests in this repository set the new values. If your site deploys
 CAPNICo from its own manifests, move those flags across **before** upgrading
-NVKE. Verify what is actually running:
+NVKE. Verify what is actually running. Read the arguments of every running
+Pod, not the Deployment template: during an incomplete rollout the template can
+show the new flags while an old Pod still runs the legacy ones.
 
 ```sh
-kubectl -n capnico-system get deployment controller-manager \
-  -o jsonpath='{.spec.template.spec.containers[?(@.name=="manager")].args}'
+kubectl -n capnico-system get pods -l control-plane=controller-manager \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.spec.containers[?(@.name=="manager")].args}{"\n"}{end}'
 ```
+
+Every Pod listed must show both new flags, and no Pod may still be rolling out.
 
 **Anything outside NVKE that reads these keys.** Dashboards, alerting rules,
 scripts and break-fix automation that match on `nke.nvidia.com/...` keep
