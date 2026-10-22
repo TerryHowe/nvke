@@ -22,7 +22,9 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames:
-      - {{ include "controller.rbacConfigMap.name" . }}
+      # Quoted: a name YAML would otherwise read as a scalar of another type
+      # (y, n, true, off) must stay the string the ConfigMap is named.
+      - {{ include "controller.rbacConfigMap.name" . | quote }}
     verbs: ["get"]
   # Publish, rotate, and clean up Secrets owned by the controller.
   - apiGroups: [""]
