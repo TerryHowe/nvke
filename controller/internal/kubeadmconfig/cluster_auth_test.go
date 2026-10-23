@@ -166,12 +166,12 @@ subjects:
   - {kind: User, name: system:admin}
 `
 	got, err := BuildClusterAuthenticationConfig(context.Background(), clusterAuthClient(clusterAuthCASecret(), cm), ClusterAuthentication{
-		ClusterName:         "tenant-1",
-		Shared:              clusterAuthShared(),
-		SharedEnabled:       true,
-		Providers:           []controllerconfig.OIDCProvider{clusterAuthOperator()},
-		TrustDomain:         clusterAuthTrustDomain,
-		ManagementNamespace: constants.LegacyManagementNamespace,
+		ClusterName:   "tenant-1",
+		Shared:        clusterAuthShared(),
+		SharedEnabled: true,
+		Providers:     []controllerconfig.OIDCProvider{clusterAuthOperator()},
+		TrustDomain:   clusterAuthTrustDomain,
+		RBACConfigMap: nvkerbac.Source{Namespace: constants.LegacyManagementNamespace, Name: nvkerbac.LegacyConfigMapName},
 	})
 	require.NoError(t, err)
 	require.Len(t, got.JWT, 2)

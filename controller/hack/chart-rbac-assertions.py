@@ -149,7 +149,7 @@ def main():
         actual_documents = [document for document in yaml.safe_load_all(result.stdout) if document]
         actual_config_map = next(
             document for document in actual_documents
-            if document.get("kind") == "ConfigMap" and document["metadata"]["name"] == "nke-rbac"
+            if document.get("kind") == "ConfigMap" and document["metadata"]["name"] == RBAC_CONFIG_MAP
         )
         actual_rbac = list(yaml.safe_load_all(actual_config_map["data"]["manifest.yaml"]))
         if actual_rbac != inner + (additional or []):
@@ -157,7 +157,7 @@ def main():
             return 1
         actual_config_map["data"]["manifest.yaml"] = config_maps[0]["data"]["manifest.yaml"]
         if actual_documents != documents:
-            print("ERROR: additional tenant RBAC must only change the nke-rbac manifest", file=sys.stderr)
+            print(f"ERROR: additional tenant RBAC must only change the {RBAC_CONFIG_MAP} manifest", file=sys.stderr)
             return 1
 
     for override, expected in (
