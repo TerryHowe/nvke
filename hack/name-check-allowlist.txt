@@ -60,7 +60,8 @@ token:^(controller|management-engine)\.nke\.nvidia\.com$
 
 # The controller's Helm release, namespace, Deployment, Service, ServiceAccount,
 # container, ConfigMaps, Temporal namespace and queue, database and Teleport
-# managed-by value, and its NVCR repository until the new one exists.
+# managed-by value, and the GHCR image repository of releases cut before the
+# rename, which stay under this name (docs/artifact-publication.md).
 token:nke-controller
 
 # The legacy managed-by value and the umbrella chart.
