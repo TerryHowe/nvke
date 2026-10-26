@@ -7,11 +7,14 @@
 package tenantaccess
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
@@ -75,6 +78,14 @@ type Controller struct {
 	tenantClientFor      func(adminConf []byte) (ctrlclient.Client, error)
 	issueAdminKubeconfig func(ctx context.Context, adminConf []byte, cluster db.Cluster, existing []byte) ([]byte, error)
 	scheme               *runtime.Scheme
+
+	// now is a test seam for the Cluster API restart coalescing window.
+	now func() time.Time
+
+	// capiRestartMu guards capiRestartedAt, the time of the last Cluster API
+	// roll this process triggered. See restartCAPI.
+	capiRestartMu   sync.Mutex
+	capiRestartedAt time.Time
 }
 
 // NewController creates a new TenantAccessController.
@@ -94,6 +105,7 @@ func NewController(
 		nodeAgentClient: nodeAgentClient,
 		tenantManagers:  tenantManagers,
 		tenantClientFor: newTenantClient,
+		now:             time.Now,
 	}
 	c.issueAdminKubeconfig = c.issueAdminBreakglass
 	return c
@@ -278,6 +290,11 @@ func (c *Controller) currentAdminKubeconfig(ctx context.Context, clusterName str
 // fleet, so taking those Secrets over is an in-place update rather than a
 // collision on an immutable field.
 func (c *Controller) upsertKubeconfigSecret(ctx context.Context, cluster db.Cluster, name string, kubeconfig []byte, mode string) error {
+	rotated, err := c.kubeconfigRotated(ctx, name, kubeconfig)
+	if err != nil {
+		return err
+	}
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -290,7 +307,42 @@ func (c *Controller) upsertKubeconfigSecret(ctx context.Context, cluster db.Clus
 		Data: map[string][]byte{KubeconfigSecretKey: kubeconfig},
 	}
 	capi.SetSecretOwnership(secret, cluster, mode, c.cfg.ManagedByLabelValue)
-	return c.upsertSecret(ctx, cluster, secret)
+
+	written, err := c.upsertSecret(ctx, cluster, secret)
+	if err != nil {
+		return err
+	}
+	if rotated && written {
+		c.restartCAPI(ctx, cluster.Name)
+	}
+	return nil
+}
+
+// kubeconfigRotated reports whether this write replaces different bytes in the
+// Secret Cluster API consumes, which is the one case where Cluster API is left
+// holding a credential that no longer matches what is published.
+//
+// Only a replacement counts. A first publish is not a rotation: Cluster API has
+// not connected to the cluster yet and reads the Secret when it does, so
+// treating a create as a rotation would roll the deployment once per cluster
+// through a fleet bring-up and gain nothing. The breakglass admin Secret is not
+// a rotation either -- Cluster API does not read it.
+func (c *Controller) kubeconfigRotated(ctx context.Context, name string, kubeconfig []byte) (bool, error) {
+	if !IsControllerKubeconfigSecretName(name) {
+		return false, nil
+	}
+
+	secret := &corev1.Secret{}
+	err := c.k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: c.secretsNamespace()}, secret)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("getting kubeconfig secret %s before publish: %w", name, err)
+	}
+
+	existing, ok := secret.Data[KubeconfigSecretKey]
+	return ok && !bytes.Equal(existing, kubeconfig), nil
 }
 
 // refreshCluster returns the live DB row. skip means do not publish because the
@@ -352,7 +404,9 @@ func (c *Controller) publishSPIRE(ctx context.Context, cluster db.Cluster, admin
 		Data: map[string][]byte{TrustBundleSecretKey: ca},
 	}
 	capi.SetSecretOwnership(trustBundleSecret, cluster, constants.LabelValueKubeconfigModeSPIRE, c.cfg.ManagedByLabelValue)
-	return c.upsertSecret(ctx, cluster, trustBundleSecret)
+
+	_, err = c.upsertSecret(ctx, cluster, trustBundleSecret)
+	return err
 }
 
 // applyRBAC server-side applies the operator-managed nke-rbac manifest into the

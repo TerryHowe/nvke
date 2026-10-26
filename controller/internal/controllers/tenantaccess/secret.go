@@ -20,7 +20,9 @@ import (
 	"github.com/dsx-ai-factory/nvke/controller/internal/db"
 )
 
-// upsertSecret publishes one Controller-owned Secret.
+// upsertSecret publishes one Controller-owned Secret, reporting whether the
+// write was performed. False with a nil error is one of the skip paths below,
+// not a no-op update.
 //
 // The live row is re-read here, immediately before the write, and not only once
 // per publish: on the OIDC path publishSPIRE applies RBAC into the tenant
@@ -28,10 +30,10 @@ import (
 // bounded by tenantRequestTimeout, not by anything quick. A cluster that started
 // deleting during it would otherwise have its Secrets re-created after teardown
 // had already removed them, orphaning them for good once the row is gone.
-func (c *Controller) upsertSecret(ctx context.Context, cluster db.Cluster, desired *corev1.Secret) error {
+func (c *Controller) upsertSecret(ctx context.Context, cluster db.Cluster, desired *corev1.Secret) (bool, error) {
 	live, skip, err := c.refreshCluster(ctx, cluster)
 	if err != nil || skip {
-		return err
+		return false, err
 	}
 
 	capiCluster := &clusterv1.Cluster{}
@@ -39,15 +41,18 @@ func (c *Controller) upsertSecret(ctx context.Context, cluster db.Cluster, desir
 	if err := c.k8sClient.Get(ctx, key, capiCluster); err != nil {
 		if apierrors.IsNotFound(err) {
 			c.logger.Debug("CAPI cluster no longer exists; skipping tenant-access publish", "clusterID", live.ID, "clusterName", live.Name)
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("getting CAPI cluster %s before publish: %w", key, err)
+		return false, fmt.Errorf("getting CAPI cluster %s before publish: %w", key, err)
 	}
 	if err := controllerutil.SetControllerReference(capiCluster, desired, c.scheme); err != nil {
-		return fmt.Errorf("setting owner reference on secret %s/%s: %w", desired.Namespace, desired.Name, err)
+		return false, fmt.Errorf("setting owner reference on secret %s/%s: %w", desired.Namespace, desired.Name, err)
 	}
 
-	return upsertOwnedSecret(ctx, c.k8sClient, c.logger, live, desired)
+	if err := upsertOwnedSecret(ctx, c.k8sClient, c.logger, live, desired); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func upsertOwnedSecret(

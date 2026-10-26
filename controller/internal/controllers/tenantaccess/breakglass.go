@@ -338,7 +338,7 @@ func (c *Controller) saveBreakglassClientKey(ctx context.Context, cluster db.Clu
 		Data: map[string][]byte{breakglassKeySecretKey: keyPEM},
 	}
 	capi.SetSecretOwnership(secret, cluster, constants.LabelValueKubeconfigModeAdmin, c.cfg.ManagedByLabelValue)
-	if err := c.upsertSecret(ctx, cluster, secret); err != nil {
+	if _, err := c.upsertSecret(ctx, cluster, secret); err != nil {
 		return err
 	}
 	// upsertSecret skips the write when the cluster has started deleting, and

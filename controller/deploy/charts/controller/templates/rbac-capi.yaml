@@ -64,6 +64,50 @@ rules:
     verbs:
       - get
 ---
+# The tenant-access controller rolls capi-controller-manager when it republishes
+# a tenant kubeconfig with different bytes. Cluster API reads a kubeconfig
+# Secret once per connection and caches the client for the life of its pod, so a
+# rotated credential does not take effect until the deployment restarts.
+#
+# A Role in capi-system rather than a rule on the ClusterRole above: this is one
+# named object in one namespace, and `resourceNames` holds for get and patch.
+# The namespace and name are the upstream Cluster API defaults and are fixed in
+# the controller as constants, so they are not values here -- the two would only
+# drift apart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "controller.fullname" . }}-capi-restart
+  namespace: capi-system
+  labels:
+    {{- include "controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    resourceNames:
+      - capi-controller-manager
+    verbs:
+      - get
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "controller.fullname" . }}-capi-restart
+  namespace: capi-system
+  labels:
+    {{- include "controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "controller.fullname" . }}-capi-restart
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "controller.serviceAccountName" . }}
+    namespace: {{ include "controller.namespace" . }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
