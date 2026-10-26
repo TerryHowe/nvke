@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/dsx-ai-factory/nvke/controller/internal/metrics"
@@ -54,8 +55,9 @@ func (c *Controller) restartCAPI(ctx context.Context, clusterName string) {
 	deployment := capiNamespace + "/" + capiDeploymentName
 
 	at := c.now()
-	if !c.claimCAPIRestart(at) {
-		c.logger.Debug("Cluster API already rolled within the coalescing window; skipping",
+	wasPending, claimed := c.claimCAPIRestart(at, clusterName)
+	if !claimed {
+		c.logger.Debug("Cluster API rolled recently; holding this rotation until the coalescing window closes",
 			"clusterName", clusterName, "deployment", deployment)
 		return
 	}
@@ -73,35 +75,86 @@ func (c *Controller) restartCAPI(ctx context.Context, clusterName string) {
 		metrics.RecordCAPIKubeconfigRestart(metrics.CAPIRestartResultAbsent)
 	default:
 		// Reopen the window so the next rotation retries instead of waiting it
-		// out behind a roll that never happened.
-		c.releaseCAPIRestart(at)
+		// out behind a roll that never happened, and restore any request that
+		// was already being held so a failure here does not discard it.
+		c.releaseCAPIRestart(at, wasPending)
 		c.logger.Error("Failed to roll Cluster API after a tenant kubeconfig rotation",
 			"clusterName", clusterName, "deployment", deployment, "error", err)
 		metrics.RecordCAPIKubeconfigRestart(metrics.CAPIRestartResultError)
 	}
 }
 
-// claimCAPIRestart reserves the coalescing window, reporting false when a roll
-// was already triggered inside it.
-func (c *Controller) claimCAPIRestart(at time.Time) bool {
+// claimCAPIRestart reserves the coalescing window, returning whether a request
+// was already being held and whether this caller may roll now, in that order.
+//
+// A request that arrives inside the window is held rather than dropped. The
+// roll that opened the window ran before this Secret was written, so it cannot
+// have loaded it; dropping the request would leave that one tenant on a
+// superseded credential until something else happened to roll the deployment.
+func (c *Controller) claimCAPIRestart(at time.Time, clusterName string) (bool, bool) {
 	c.capiRestartMu.Lock()
 	defer c.capiRestartMu.Unlock()
 
+	wasPending := c.capiRestartPending
 	if !c.capiRestartedAt.IsZero() && at.Sub(c.capiRestartedAt) < capiRestartMinInterval {
-		return false
+		c.capiRestartPending = true
+		c.capiRestartPendingFor = clusterName
+		return wasPending, false
 	}
+
 	c.capiRestartedAt = at
-	return true
+	c.capiRestartPending = false
+	c.capiRestartPendingFor = ""
+	return wasPending, true
 }
 
-// releaseCAPIRestart reopens a window claimed for a roll that then failed. The
-// equality check keeps it from discarding a newer claim.
-func (c *Controller) releaseCAPIRestart(at time.Time) {
+// releaseCAPIRestart reopens a window claimed for a roll that then failed, and
+// restores the held request the claim consumed. The equality check keeps it
+// from discarding a newer claim.
+func (c *Controller) releaseCAPIRestart(at time.Time, wasPending bool) {
 	c.capiRestartMu.Lock()
 	defer c.capiRestartMu.Unlock()
 
 	if c.capiRestartedAt.Equal(at) {
 		c.capiRestartedAt = time.Time{}
+		c.capiRestartPending = wasPending
+	}
+}
+
+// pendingCAPIRestart returns the cluster whose rotation is being held, how long
+// until that roll is due, and whether one is held at all, in that order. A zero
+// delay means it is due now.
+func (c *Controller) pendingCAPIRestart(at time.Time) (string, time.Duration, bool) {
+	c.capiRestartMu.Lock()
+	defer c.capiRestartMu.Unlock()
+
+	if !c.capiRestartPending {
+		return "", 0, false
+	}
+
+	elapsed := at.Sub(c.capiRestartedAt)
+	if elapsed >= capiRestartMinInterval {
+		return c.capiRestartPendingFor, 0, true
+	}
+	return c.capiRestartPendingFor, capiRestartMinInterval - elapsed, true
+}
+
+// drainPendingCAPIRestart rolls a held request once its window has closed, and
+// otherwise asks the reconciler to come back when it does.
+//
+// The requeue is the point: a held request must not wait for whatever reconcile
+// happens to arrive next, which on a quiet site is the periodic resync. That
+// delay is the one this change exists to remove.
+func (c *Controller) drainPendingCAPIRestart(ctx context.Context) ctrl.Result {
+	clusterName, delay, pending := c.pendingCAPIRestart(c.now())
+	switch {
+	case !pending:
+		return ctrl.Result{}
+	case delay > 0:
+		return ctrl.Result{RequeueAfter: delay}
+	default:
+		c.restartCAPI(ctx, clusterName)
+		return ctrl.Result{}
 	}
 }
 

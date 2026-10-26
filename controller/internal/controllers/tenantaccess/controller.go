@@ -82,10 +82,13 @@ type Controller struct {
 	// now is a test seam for the Cluster API restart coalescing window.
 	now func() time.Time
 
-	// capiRestartMu guards capiRestartedAt, the time of the last Cluster API
-	// roll this process triggered. See restartCAPI.
-	capiRestartMu   sync.Mutex
-	capiRestartedAt time.Time
+	// capiRestartMu guards the Cluster API coalescing state: the time of the
+	// last roll this process triggered, and the rotation held back because it
+	// landed inside that roll's window. See restartCAPI.
+	capiRestartMu         sync.Mutex
+	capiRestartedAt       time.Time
+	capiRestartPending    bool
+	capiRestartPendingFor string
 }
 
 // NewController creates a new TenantAccessController.
@@ -201,9 +204,15 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		c.tenantManagers.RemoveCluster(cluster.ID)
 		// No Secret writes: Kubernetes GC removes the owned Secrets once the
 		// CAPI Cluster itself finishes deleting.
-		return ctrl.Result{}, nil
+		return c.drainPendingCAPIRestart(ctx), nil
 	}
-	return ctrl.Result{}, c.reconcileCluster(ctx, cluster)
+
+	if err := c.reconcileCluster(ctx, cluster); err != nil {
+		return ctrl.Result{}, err
+	}
+	// A rotation held back by the coalescing window is rolled here, or requeued
+	// for when its window closes.
+	return c.drainPendingCAPIRestart(ctx), nil
 }
 
 // reconcileCluster fetches a control-plane node's admin kubeconfig and publishes

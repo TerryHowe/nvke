@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -67,9 +68,10 @@ func TestRestartCAPI(t *testing.T) {
 			wantStamps: []string{"2026-10-24T12:00:00Z"},
 		},
 		{
-			name: "a second rotation inside the window is coalesced into the first roll",
+			name: "rotations inside the window do not each roll",
 			// Several tenant kubeconfigs rotating in one pass must not roll
-			// Cluster API once per cluster.
+			// Cluster API once per cluster. They are held, not dropped --
+			// TestDrainPendingCAPIRestart covers the trailing roll.
 			offsets:    []time.Duration{0, time.Minute, 2 * time.Minute},
 			wantStamps: []string{"2026-10-24T12:00:00Z", "2026-10-24T12:00:00Z", "2026-10-24T12:00:00Z"},
 		},
@@ -131,6 +133,74 @@ func TestRestartCAPIReopensWindowAfterFailure(t *testing.T) {
 	c.now = func() time.Time { return start.Add(time.Second) }
 	c.restartCAPI(ctx, "tenant")
 	assert.Equal(t, "2026-10-24T12:00:01Z", capiRestartedAtAnnotation(t, ctx, k8sClient))
+}
+
+// A rotation that lands inside the window must be held, not dropped: the roll
+// that opened the window ran before that Secret was written, so it cannot have
+// loaded it. Without the trailing roll that tenant stays on a superseded
+// credential until something else happens to roll the deployment.
+func TestDrainPendingCAPIRestart(t *testing.T) {
+	ctx := context.Background()
+	start := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+
+	k8sClient := fake.NewClientBuilder().WithScheme(capiRestartScheme(t)).WithObjects(capiDeploymentFixture()).Build()
+	c := newTestController(config.Config{}, &testutil.MockDB{}, k8sClient, nil)
+
+	// Nothing held yet: no roll and no requeue.
+	c.now = func() time.Time { return start }
+	assert.Equal(t, ctrl.Result{}, c.drainPendingCAPIRestart(ctx))
+
+	// First rotation rolls.
+	c.restartCAPI(ctx, "tenant-a")
+	require.Equal(t, "2026-10-24T12:00:00Z", capiRestartedAtAnnotation(t, ctx, k8sClient))
+
+	// A second tenant rotates one minute in. It is suppressed now...
+	c.now = func() time.Time { return start.Add(time.Minute) }
+	c.restartCAPI(ctx, "tenant-b")
+	require.Equal(t, "2026-10-24T12:00:00Z", capiRestartedAtAnnotation(t, ctx, k8sClient))
+
+	// ...and the reconciler is asked to come back when the window closes.
+	assert.Equal(t, ctrl.Result{RequeueAfter: 9 * time.Minute}, c.drainPendingCAPIRestart(ctx))
+
+	// On that callback the held rotation rolls.
+	c.now = func() time.Time { return start.Add(capiRestartMinInterval) }
+	assert.Equal(t, ctrl.Result{}, c.drainPendingCAPIRestart(ctx))
+	assert.Equal(t, "2026-10-24T12:10:00Z", capiRestartedAtAnnotation(t, ctx, k8sClient))
+
+	// And it is not rolled twice.
+	c.now = func() time.Time { return start.Add(capiRestartMinInterval + time.Second) }
+	assert.Equal(t, ctrl.Result{}, c.drainPendingCAPIRestart(ctx))
+	assert.Equal(t, "2026-10-24T12:10:00Z", capiRestartedAtAnnotation(t, ctx, k8sClient))
+}
+
+// A roll that fails must not swallow a rotation that was already being held.
+func TestRestartCAPIKeepsHeldRotationWhenRollFails(t *testing.T) {
+	ctx := context.Background()
+	start := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+
+	k8sClient := &patchFailingClient{
+		Client: fake.NewClientBuilder().WithScheme(capiRestartScheme(t)).WithObjects(capiDeploymentFixture()).Build(),
+	}
+	c := newTestController(config.Config{}, &testutil.MockDB{}, k8sClient, nil)
+
+	c.now = func() time.Time { return start }
+	c.restartCAPI(ctx, "tenant-a")
+
+	// tenant-b rotates inside the window and is held.
+	c.now = func() time.Time { return start.Add(time.Minute) }
+	c.restartCAPI(ctx, "tenant-b")
+
+	// The window closes and the held roll is attempted, but the patch fails.
+	k8sClient.fail = true
+	c.now = func() time.Time { return start.Add(capiRestartMinInterval) }
+	c.drainPendingCAPIRestart(ctx)
+	assert.Equal(t, "2026-10-24T12:00:00Z", capiRestartedAtAnnotation(t, ctx, k8sClient), "the failing patch must not have landed")
+
+	// tenant-b is still held, so the next drain retries and succeeds.
+	k8sClient.fail = false
+	c.now = func() time.Time { return start.Add(capiRestartMinInterval + time.Second) }
+	c.drainPendingCAPIRestart(ctx)
+	assert.Equal(t, "2026-10-24T12:10:01Z", capiRestartedAtAnnotation(t, ctx, k8sClient))
 }
 
 func TestKubeconfigRotated(t *testing.T) {
