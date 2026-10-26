@@ -162,7 +162,8 @@ image exists nowhere. Later releases land under `ghcr.io/dsx-ai-factory/nvke`.
 
 ### Image repository and pull secret names
 
-The controller image is `nvke-controller` on every registry, like the chart. Releases
+The controller image is `nvke-controller` on every registry. The chart is `nvke-controller`
+on GHCR and `nvke-controller-chart` on NVCR. Releases
 cut before this rename were promoted to `ghcr.io/dsx-ai-factory/nvke/nke-controller`,
 which stays in place so existing pins keep resolving; nothing is republished under the new
 name. A pin moves to `nvke-controller` only once its tag exists there.

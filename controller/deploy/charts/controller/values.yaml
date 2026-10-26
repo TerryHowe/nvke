@@ -663,7 +663,7 @@ profiles:
     # -- Copy `/profiles` from a content image into profiles.path
     enabled: false
     # -- Repository, including registry, for the fleet profiles content image
-    # (not the nke-controller image above). Override to pull it from a
+    # (not the nvke-controller image above). Override to pull it from a
     # different registry (e.g. a private mirror); pair any change with a
     # matching `imagePullSecrets` entry.
     repository: nvcr.io/j7sbcjl3qgta/cwe-profiles
