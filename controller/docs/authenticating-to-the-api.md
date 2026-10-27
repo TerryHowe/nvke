@@ -78,7 +78,7 @@ any deployment whose chart renders the configuration, sets none and has
 pins the old name). Read that switch with:
 
 ```bash
-kubectl -n nke-controller get configmap nvke-controller-config \
+kubectl -n nvke-controller get configmap nvke-controller-config \
   -o jsonpath='{.data.config\.yaml}' | yq '.apiAuth.enabled'
 ```
 
