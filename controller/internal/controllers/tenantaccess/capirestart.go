@@ -34,6 +34,13 @@ const (
 	// drops every workload-cluster informer Cluster API holds and rebuilds them
 	// against every tenant apiserver at once.
 	capiRestartMinInterval = 10 * time.Minute
+
+	// capiRestartRetryDelay is how long drainPendingCAPIRestart asks to be
+	// called back after a roll that failed. A failure is an apiserver error on
+	// a single patch, not something the coalescing window is protecting
+	// against, so the retry is paced off this rather than waiting out another
+	// capiRestartMinInterval.
+	capiRestartRetryDelay = 30 * time.Second
 )
 
 // restartCAPI rolls capi-controller-manager so it rebuilds its workload-cluster
@@ -48,14 +55,17 @@ const (
 // fires seven days before that. Rolling the deployment is what makes a rotation
 // take effect when it happens rather than after the page.
 //
-// Best effort. A failure here leaves a correctly published Secret and a stale
-// cache, which is exactly the behavior without this call, so it is logged and
-// counted rather than failing the publish.
+// Best effort for this call, not for the rotation. A failure here leaves a
+// correctly published Secret and a stale cache, so it is logged and counted
+// rather than failing the publish -- but it is also held for retry, because the
+// Secret now holds the rotated bytes and no later reconcile will detect that
+// rotation again. Dropping it would leave that tenant on exactly the stale
+// client this exists to replace, until the superseded credential expired.
 func (c *Controller) restartCAPI(ctx context.Context, clusterName string) {
 	deployment := capiNamespace + "/" + capiDeploymentName
 
 	at := c.now()
-	wasPending, claimed := c.claimCAPIRestart(at, clusterName)
+	claimed := c.claimCAPIRestart(at, clusterName)
 	if !claimed {
 		c.logger.Debug("Cluster API rolled recently; holding this rotation until the coalescing window closes",
 			"clusterName", clusterName, "deployment", deployment)
@@ -75,49 +85,52 @@ func (c *Controller) restartCAPI(ctx context.Context, clusterName string) {
 		metrics.RecordCAPIKubeconfigRestart(metrics.CAPIRestartResultAbsent)
 	default:
 		// Reopen the window so the next rotation retries instead of waiting it
-		// out behind a roll that never happened, and restore any request that
-		// was already being held so a failure here does not discard it.
-		c.releaseCAPIRestart(at, wasPending)
+		// out behind a roll that never happened, and hold this one so the
+		// retry is owned by drainPendingCAPIRestart rather than by whatever
+		// rotation happens to come along next -- for a first rotation, none
+		// ever does.
+		c.releaseCAPIRestart(at, clusterName)
 		c.logger.Error("Failed to roll Cluster API after a tenant kubeconfig rotation",
 			"clusterName", clusterName, "deployment", deployment, "error", err)
 		metrics.RecordCAPIKubeconfigRestart(metrics.CAPIRestartResultError)
 	}
 }
 
-// claimCAPIRestart reserves the coalescing window, returning whether a request
-// was already being held and whether this caller may roll now, in that order.
+// claimCAPIRestart reserves the coalescing window, reporting whether this
+// caller may roll now.
 //
 // A request that arrives inside the window is held rather than dropped. The
 // roll that opened the window ran before this Secret was written, so it cannot
 // have loaded it; dropping the request would leave that one tenant on a
 // superseded credential until something else happened to roll the deployment.
-func (c *Controller) claimCAPIRestart(at time.Time, clusterName string) (bool, bool) {
+func (c *Controller) claimCAPIRestart(at time.Time, clusterName string) bool {
 	c.capiRestartMu.Lock()
 	defer c.capiRestartMu.Unlock()
 
-	wasPending := c.capiRestartPending
 	if !c.capiRestartedAt.IsZero() && at.Sub(c.capiRestartedAt) < capiRestartMinInterval {
 		c.capiRestartPending = true
 		c.capiRestartPendingFor = clusterName
-		return wasPending, false
+		return false
 	}
 
 	c.capiRestartedAt = at
 	c.capiRestartPending = false
 	c.capiRestartPendingFor = ""
-	return wasPending, true
+	return true
 }
 
-// releaseCAPIRestart reopens a window claimed for a roll that then failed, and
-// restores the held request the claim consumed. The equality check keeps it
-// from discarding a newer claim.
-func (c *Controller) releaseCAPIRestart(at time.Time, wasPending bool) {
+// releaseCAPIRestart reopens a window claimed for a roll that then failed and
+// holds the rotation for retry. The equality check keeps it from disturbing a
+// newer claim: that roll runs after this one gave up, so it loads this
+// rotation's bytes too and there is nothing left to retry.
+func (c *Controller) releaseCAPIRestart(at time.Time, clusterName string) {
 	c.capiRestartMu.Lock()
 	defer c.capiRestartMu.Unlock()
 
 	if c.capiRestartedAt.Equal(at) {
 		c.capiRestartedAt = time.Time{}
-		c.capiRestartPending = wasPending
+		c.capiRestartPending = true
+		c.capiRestartPendingFor = clusterName
 	}
 }
 
@@ -144,18 +157,24 @@ func (c *Controller) pendingCAPIRestart(at time.Time) (string, time.Duration, bo
 //
 // The requeue is the point: a held request must not wait for whatever reconcile
 // happens to arrive next, which on a quiet site is the periodic resync. That
-// delay is the one this change exists to remove.
+// delay is the one this change exists to remove. It applies equally to a roll
+// that fails here -- restartCAPI holds the rotation again, and nothing else
+// would come back for it.
 func (c *Controller) drainPendingCAPIRestart(ctx context.Context) ctrl.Result {
 	clusterName, delay, pending := c.pendingCAPIRestart(c.now())
-	switch {
-	case !pending:
-		return ctrl.Result{}
-	case delay > 0:
-		return ctrl.Result{RequeueAfter: delay}
-	default:
-		c.restartCAPI(ctx, clusterName)
+	if !pending {
 		return ctrl.Result{}
 	}
+	if delay > 0 {
+		return ctrl.Result{RequeueAfter: delay}
+	}
+
+	c.restartCAPI(ctx, clusterName)
+
+	if _, _, stillPending := c.pendingCAPIRestart(c.now()); stillPending {
+		return ctrl.Result{RequeueAfter: capiRestartRetryDelay}
+	}
+	return ctrl.Result{}
 }
 
 // rollCAPIDeployment stamps the pod-template annotation that triggers a rolling

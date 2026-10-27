@@ -191,16 +191,54 @@ func TestRestartCAPIKeepsHeldRotationWhenRollFails(t *testing.T) {
 	c.restartCAPI(ctx, "tenant-b")
 
 	// The window closes and the held roll is attempted, but the patch fails.
+	// The drain must ask to come back: nothing else will, and the rotated bytes
+	// are already published, so no later reconcile detects that rotation again.
 	k8sClient.fail = true
 	c.now = func() time.Time { return start.Add(capiRestartMinInterval) }
-	c.drainPendingCAPIRestart(ctx)
+	assert.Equal(t, ctrl.Result{RequeueAfter: capiRestartRetryDelay}, c.drainPendingCAPIRestart(ctx))
 	assert.Equal(t, "2026-10-24T12:00:00Z", capiRestartedAtAnnotation(t, ctx, k8sClient), "the failing patch must not have landed")
 
 	// tenant-b is still held, so the next drain retries and succeeds.
 	k8sClient.fail = false
 	c.now = func() time.Time { return start.Add(capiRestartMinInterval + time.Second) }
-	c.drainPendingCAPIRestart(ctx)
+	assert.Equal(t, ctrl.Result{}, c.drainPendingCAPIRestart(ctx))
 	assert.Equal(t, "2026-10-24T12:10:01Z", capiRestartedAtAnnotation(t, ctx, k8sClient))
+}
+
+// The first rotation for a cluster is the one with no second chance: the Secret
+// now holds the rotated bytes, so kubeconfigRotated never fires for it again. A
+// roll that fails must therefore be held for retry even though nothing was
+// pending before it, or one transient patch error leaves that tenant on the
+// stale client until the superseded credential is actually rejected -- which is
+// the page this whole path exists to prevent.
+func TestRestartCAPIHoldsFirstRotationWhenRollFails(t *testing.T) {
+	ctx := context.Background()
+	start := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+
+	k8sClient := &patchFailingClient{
+		Client: fake.NewClientBuilder().WithScheme(capiRestartScheme(t)).WithObjects(capiDeploymentFixture()).Build(),
+		fail:   true,
+	}
+	c := newTestController(config.Config{}, &testutil.MockDB{}, k8sClient, nil)
+
+	// Nothing has rolled yet, so this rotation claims the window and fails.
+	c.now = func() time.Time { return start }
+	c.restartCAPI(ctx, "tenant")
+	require.Empty(t, capiRestartedAtAnnotation(t, ctx, k8sClient), "the failing patch must not have landed")
+
+	// The publish path's own drain retries immediately, and fails again.
+	assert.Equal(t, ctrl.Result{RequeueAfter: capiRestartRetryDelay}, c.drainPendingCAPIRestart(ctx))
+
+	// On the requeue the rotation is still held, and rolls.
+	k8sClient.fail = false
+	c.now = func() time.Time { return start.Add(capiRestartRetryDelay) }
+	assert.Equal(t, ctrl.Result{}, c.drainPendingCAPIRestart(ctx))
+	assert.Equal(t, "2026-10-24T12:00:30Z", capiRestartedAtAnnotation(t, ctx, k8sClient))
+
+	// And the roll is not repeated once it has landed.
+	c.now = func() time.Time { return start.Add(capiRestartRetryDelay + time.Second) }
+	assert.Equal(t, ctrl.Result{}, c.drainPendingCAPIRestart(ctx))
+	assert.Equal(t, "2026-10-24T12:00:30Z", capiRestartedAtAnnotation(t, ctx, k8sClient))
 }
 
 func TestKubeconfigRotated(t *testing.T) {
