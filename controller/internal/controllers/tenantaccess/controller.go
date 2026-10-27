@@ -43,6 +43,12 @@ import (
 const (
 	// KubeconfigSecretKey is the data key inside the per-cluster kubeconfig Secret.
 	KubeconfigSecretKey = "value"
+
+	// kubeconfigSourceNodeAnnotation records the control-plane node whose
+	// admin.conf the Secret holds, so the next publish can tell a credential
+	// that rotated from one that merely came off a different node. See
+	// kubeconfigRotated.
+	kubeconfigSourceNodeAnnotation = "nvke.nvidia.com/kubeconfig-source-node"
 )
 
 // KubeconfigSecretName returns the Secret name that holds the per-cluster
@@ -219,7 +225,7 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // tenant access from it. The admin Secret gets an nvke:breakglass kubeconfig.
 // The controller Secret gets admin.conf, or a SPIRE kubeconfig when OIDC is on.
 func (c *Controller) reconcileCluster(ctx context.Context, cluster db.Cluster) error {
-	adminConf, ready, err := c.fetchAdminKubeconfig(ctx, cluster)
+	admin, ready, err := c.fetchAdminKubeconfig(ctx, cluster)
 	if err != nil {
 		return err
 	}
@@ -231,13 +237,13 @@ func (c *Controller) reconcileCluster(ctx context.Context, cluster db.Cluster) e
 		return nil
 	}
 
-	return c.publish(ctx, cluster, adminConf)
+	return c.publish(ctx, cluster, admin)
 }
 
 // publish writes the kubeconfig Secrets for one cluster. Split from
 // reconcileCluster so the publish decision can be exercised without standing up
 // a node-agent to serve admin.conf.
-func (c *Controller) publish(ctx context.Context, cluster db.Cluster, adminConf []byte) error {
+func (c *Controller) publish(ctx context.Context, cluster db.Cluster, admin adminKubeconfig) error {
 	// Re-read the cluster before choosing a mode: Reconcile's initial row can
 	// become stale during the agent probe, so an OIDC flag change during the probe
 	// must be honored.
@@ -253,11 +259,14 @@ func (c *Controller) publish(ctx context.Context, cluster db.Cluster, adminConf 
 
 	var publishErr error
 	if live.OIDCAuthEnabled {
-		publishErr = c.publishSPIRE(ctx, live, adminConf)
+		publishErr = c.publishSPIRE(ctx, live, admin.bytes)
 	} else {
-		publishErr = c.upsertKubeconfigSecret(ctx, live, KubeconfigSecretName(live.Name), adminConf, constants.LabelValueKubeconfigModeAdmin)
+		// The only Secret whose bytes come straight off a node, so the only one
+		// that records which node served them.
+		publishErr = c.upsertKubeconfigSecret(ctx, live,
+			KubeconfigSecretName(live.Name), admin.bytes, constants.LabelValueKubeconfigModeAdmin, admin.sourceNode)
 	}
-	return errors.Join(publishErr, c.publishBreakglass(ctx, live, adminConf))
+	return errors.Join(publishErr, c.publishBreakglass(ctx, live, admin.bytes))
 }
 
 // publishBreakglass stores the nvke:breakglass kubeconfig in the admin Secret.
@@ -266,11 +275,12 @@ func (c *Controller) publishBreakglass(ctx context.Context, live db.Cluster, adm
 	if err != nil {
 		return err
 	}
-	adminKubeconfig, err := c.issueAdminKubeconfig(ctx, adminConf, live, existing)
+	breakglassConf, err := c.issueAdminKubeconfig(ctx, adminConf, live, existing)
 	if err != nil {
 		return fmt.Errorf("issuing breakglass kubeconfig for cluster %s: %w", live.Name, err)
 	}
-	return c.upsertKubeconfigSecret(ctx, live, AdminKubeconfigSecretName(live.Name), adminKubeconfig, constants.LabelValueKubeconfigModeAdmin)
+	return c.upsertKubeconfigSecret(ctx, live,
+		AdminKubeconfigSecretName(live.Name), breakglassConf, constants.LabelValueKubeconfigModeAdmin, "")
 }
 
 // currentAdminKubeconfig returns the admin Secret payload, or nil when it
@@ -298,8 +308,13 @@ func (c *Controller) currentAdminKubeconfig(ctx context.Context, clusterName str
 // kubeconfig is. It also matches what the retired SWE controller left on the
 // fleet, so taking those Secrets over is an in-place update rather than a
 // collision on an immutable field.
-func (c *Controller) upsertKubeconfigSecret(ctx context.Context, cluster db.Cluster, name string, kubeconfig []byte, mode string) error {
-	rotated, err := c.kubeconfigRotated(ctx, name, kubeconfig)
+// sourceNode is the control-plane node the kubeconfig was read from, empty for
+// a kubeconfig this controller built rather than fetched. It is recorded on the
+// Secret and drives the rotation decision.
+func (c *Controller) upsertKubeconfigSecret(
+	ctx context.Context, cluster db.Cluster, name string, kubeconfig []byte, mode, sourceNode string,
+) error {
+	rotated, err := c.kubeconfigRotated(ctx, name, kubeconfig, sourceNode)
 	if err != nil {
 		return err
 	}
@@ -315,6 +330,10 @@ func (c *Controller) upsertKubeconfigSecret(ctx context.Context, cluster db.Clus
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{KubeconfigSecretKey: kubeconfig},
 	}
+	// Written even when empty, so a Secret that stops being node-derived -- a
+	// cluster switching to the SPIRE kubeconfig -- does not keep pointing at
+	// the last node that served the old one.
+	secret.Annotations = map[string]string{kubeconfigSourceNodeAnnotation: sourceNode}
 	capi.SetSecretOwnership(secret, cluster, mode, c.cfg.ManagedByLabelValue)
 
 	written, err := c.upsertSecret(ctx, cluster, secret)
@@ -327,16 +346,27 @@ func (c *Controller) upsertKubeconfigSecret(ctx context.Context, cluster db.Clus
 	return nil
 }
 
-// kubeconfigRotated reports whether this write replaces different bytes in the
-// Secret Cluster API consumes, which is the one case where Cluster API is left
-// holding a credential that no longer matches what is published.
+// kubeconfigRotated reports whether this write leaves Cluster API holding a
+// credential that no longer works, which is the one case worth rolling for.
 //
 // Only a replacement counts. A first publish is not a rotation: Cluster API has
 // not connected to the cluster yet and reads the Secret when it does, so
 // treating a create as a rotation would roll the deployment once per cluster
 // through a fleet bring-up and gain nothing. The breakglass admin Secret is not
 // a rotation either -- Cluster API does not read it.
-func (c *Controller) kubeconfigRotated(ctx context.Context, name string, kubeconfig []byte) (bool, error) {
+//
+// Nor is every byte difference a rotation. kubeadm issues each control-plane
+// node its own admin.conf, so switching source nodes -- which happens whenever
+// the lowest-UUID healthy candidate changes, or one GetKubeconfig probe just
+// fails -- republishes different bytes for credentials that never changed.
+// Rolling on that would drop every workload-cluster informer Cluster API holds
+// because one node-agent probe flaked, and it gains nothing: the credential
+// Cluster API cached is the previous node's, and that one is still valid.
+//
+// A changed server URL or cluster CA is the exception, because neither is a
+// property of the node that served the file. Those do invalidate the cached
+// client, so they roll however the source node moved.
+func (c *Controller) kubeconfigRotated(ctx context.Context, name string, kubeconfig []byte, sourceNode string) (bool, error) {
 	if !IsControllerKubeconfigSecretName(name) {
 		return false, nil
 	}
@@ -351,7 +381,56 @@ func (c *Controller) kubeconfigRotated(ctx context.Context, name string, kubecon
 	}
 
 	existing, ok := secret.Data[KubeconfigSecretKey]
-	return ok && !bytes.Equal(existing, kubeconfig), nil
+	if !ok || bytes.Equal(existing, kubeconfig) {
+		return false, nil
+	}
+
+	publishedBy := secret.Annotations[kubeconfigSourceNodeAnnotation]
+	if sourceNode == "" || publishedBy == "" || publishedBy == sourceNode {
+		// Same node, or a kubeconfig this controller builds itself and whose
+		// bytes therefore do not depend on one. Either way the difference is
+		// in the credential.
+		return true, nil
+	}
+
+	return endpointChanged(existing, kubeconfig), nil
+}
+
+// endpointChanged reports whether two kubeconfigs name a different API server
+// or carry a different cluster CA -- the parts that belong to the cluster
+// rather than to the node the file was read from.
+//
+// An unparseable kubeconfig is reported as changed rather than as an error: the
+// publish has already succeeded by this point, and refusing to roll because a
+// Secret from some earlier writer will not parse is the worse failure.
+func endpointChanged(existing, published []byte) bool {
+	existingServer, existingCA, err := kubeconfigEndpoint(existing)
+	if err != nil {
+		return true
+	}
+	publishedServer, publishedCA, err := kubeconfigEndpoint(published)
+	if err != nil {
+		return true
+	}
+
+	return existingServer != publishedServer || !bytes.Equal(existingCA, publishedCA)
+}
+
+// kubeconfigEndpoint returns a kubeconfig's API server URL and cluster CA.
+func kubeconfigEndpoint(kubeconfig []byte) (string, []byte, error) {
+	cfg, err := clientcmd.Load(kubeconfig)
+	if err != nil {
+		return "", nil, fmt.Errorf("parsing kubeconfig: %w", err)
+	}
+	server, err := extractServerFromKubeconfig(cfg)
+	if err != nil {
+		return "", nil, err
+	}
+	ca, err := extractCAFromKubeconfig(cfg)
+	if err != nil {
+		return "", nil, err
+	}
+	return server, ca, nil
 }
 
 // refreshCluster returns the live DB row. skip means do not publish because the
@@ -400,7 +479,10 @@ func (c *Controller) publishSPIRE(ctx context.Context, cluster db.Cluster, admin
 		return fmt.Errorf("building SPIRE kubeconfig for cluster %s: %w", cluster.Name, err)
 	}
 
-	if err := c.upsertKubeconfigSecret(ctx, cluster, KubeconfigSecretName(cluster.Name), kubeconfig, constants.LabelValueKubeconfigModeSPIRE); err != nil {
+	// No source node: this kubeconfig is built here from the cluster's server
+	// and CA, not read off a node, so its bytes do not move with the candidate.
+	if err := c.upsertKubeconfigSecret(ctx, cluster,
+		KubeconfigSecretName(cluster.Name), kubeconfig, constants.LabelValueKubeconfigModeSPIRE, ""); err != nil {
 		return err
 	}
 

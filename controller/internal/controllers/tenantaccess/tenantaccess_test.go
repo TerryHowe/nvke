@@ -388,7 +388,7 @@ func TestFetchAdminKubeconfig(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				assert.Equal(t, tc.wantReady, ready)
-				assert.Equal(t, tc.want, string(got))
+				assert.Equal(t, tc.want, string(got.bytes))
 			}
 			assert.Len(t, nodeAgentClient.GetKubeconfigCalls, tc.wantProbes)
 		})
@@ -850,7 +850,10 @@ func TestFetchAdminKubeconfigPicksTheSameNodeRegardlessOfRowOrder(t *testing.T) 
 		require.True(t, ready)
 
 		// Lowest node ID wins every time, so the published bytes are stable.
-		assert.Equal(t, "admin-conf-aa", string(got))
+		assert.Equal(t, "admin-conf-aa", string(got.bytes))
+		// And the node that answered travels with them, so the publish path can
+		// tell a rotated credential from a different node's.
+		assert.Equal(t, first.ID.String(), got.sourceNode)
 		assert.Equal(t, []uuid.UUID{first.ID}, nodeAgentClient.GetKubeconfigCalls)
 	}
 }
@@ -932,7 +935,7 @@ func TestPublish_RefusesWrongOwnerSecret(t *testing.T) {
 	c.tenantClientFor = func([]byte) (ctrlclient.Client, error) {
 		return fake.NewClientBuilder().WithScheme(tenantScheme(t)).Build(), nil
 	}
-	err := c.publish(ctx, cluster, []byte(testAdminConf))
+	err := c.publish(ctx, cluster, adminKubeconfig{bytes: []byte(testAdminConf)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, capi.ErrWrongSecretOwner)
 }
@@ -978,7 +981,7 @@ func TestPublish_StoresIssuedAdminKubeconfig(t *testing.T) {
 		return []byte("breakglass-kubeconfig"), nil
 	}
 
-	require.NoError(t, c.publish(ctx, cluster, []byte(testAdminConf)))
+	require.NoError(t, c.publish(ctx, cluster, adminKubeconfig{bytes: []byte(testAdminConf)}))
 
 	assertAdminSecret(t, ctx, k8sClient, cluster, "breakglass-kubeconfig")
 	controllerSecret := &corev1.Secret{}
@@ -1001,7 +1004,7 @@ func TestPublish_PublishesControllerKubeconfigWhenIssuanceFails(t *testing.T) {
 		return nil, errors.New("client CSR nvke-breakglass is not signed yet")
 	}
 
-	err := c.publish(ctx, cluster, []byte(testAdminConf))
+	err := c.publish(ctx, cluster, adminKubeconfig{bytes: []byte(testAdminConf)})
 	require.ErrorContains(t, err, "issuing breakglass kubeconfig for cluster plain")
 	require.ErrorContains(t, err, "not signed yet")
 
@@ -1032,7 +1035,7 @@ func TestPublish_ReturnsSPIREAndBreakglassErrors(t *testing.T) {
 		return nil, errors.New("client CSR nvke-breakglass failed: denied by kubectl certificate deny")
 	}
 
-	err := c.publish(ctx, cluster, []byte(testAdminConf))
+	err := c.publish(ctx, cluster, adminKubeconfig{bytes: []byte(testAdminConf)})
 	require.ErrorContains(t, err, "nke-rbac ConfigMap not found")
 	require.ErrorContains(t, err, "issuing breakglass kubeconfig for cluster oidc")
 	require.ErrorContains(t, err, "denied by kubectl certificate deny")
@@ -1046,7 +1049,7 @@ func TestPublish_SkipsMissingCluster(t *testing.T) {
 	mockDB.On("GetCluster", mock.Anything, cluster.ID).Return(db.Cluster{}, db.ErrNotFound)
 	k8sClient := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	c := newPublishTestController(mockDB, k8sClient)
-	require.NoError(t, c.publish(ctx, cluster, []byte(testKubeconfig)))
+	require.NoError(t, c.publish(ctx, cluster, adminKubeconfig{bytes: []byte(testKubeconfig)}))
 	assertSecret(t, ctx, k8sClient, cluster, false)
 }
 
@@ -1060,7 +1063,7 @@ func TestPublish_SkipsDeletingCluster(t *testing.T) {
 	mockDB.On("GetCluster", mock.Anything, cluster.ID).Return(live, nil)
 	k8sClient := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	c := newPublishTestController(mockDB, k8sClient)
-	require.NoError(t, c.publish(ctx, cluster, []byte(testKubeconfig)))
+	require.NoError(t, c.publish(ctx, cluster, adminKubeconfig{bytes: []byte(testKubeconfig)}))
 	assertSecret(t, ctx, k8sClient, cluster, false)
 }
 
@@ -1087,7 +1090,7 @@ func TestPublish_RewritesAdminToSPIRE(t *testing.T) {
 	c.tenantClientFor = func([]byte) (ctrlclient.Client, error) {
 		return fake.NewClientBuilder().WithScheme(tenantScheme(t)).Build(), nil
 	}
-	require.NoError(t, c.publish(ctx, cluster, []byte(testAdminConf)))
+	require.NoError(t, c.publish(ctx, cluster, adminKubeconfig{bytes: []byte(testAdminConf)}))
 
 	got := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{
@@ -1116,7 +1119,7 @@ func TestPublish_CAPIClusterOIDCConsumedFromNVKESystem(t *testing.T) {
 	c.tenantClientFor = func([]byte) (ctrlclient.Client, error) {
 		return fake.NewClientBuilder().WithScheme(tenantScheme(t)).Build(), nil
 	}
-	require.NoError(t, c.publish(ctx, cluster, kubeconfigWithParseableCA(t)))
+	require.NoError(t, c.publish(ctx, cluster, adminKubeconfig{bytes: kubeconfigWithParseableCA(t)}))
 
 	dbProvider := kube.NewDBClusterTenantClientProvider(nil, k8sClient, nil, false, constants.LegacyManagementNamespace)
 	tenantClient, err := dbProvider.ClientForDBCluster(ctx, cluster)
@@ -1137,7 +1140,7 @@ func TestPublish_UsesLiveOIDCAuthEnabled(t *testing.T) {
 	c.tenantClientFor = func([]byte) (ctrlclient.Client, error) {
 		return fake.NewClientBuilder().WithScheme(tenantScheme(t)).Build(), nil
 	}
-	require.NoError(t, c.publish(ctx, snapshot, []byte(testAdminConf)))
+	require.NoError(t, c.publish(ctx, snapshot, adminKubeconfig{bytes: []byte(testAdminConf)}))
 
 	got := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{
@@ -1156,7 +1159,7 @@ func TestPublish_RefusesSPIREWithoutRBAC(t *testing.T) {
 	mockDB := &testutil.MockDB{}
 	mockDB.On("GetCluster", mock.Anything, cluster.ID).Return(cluster, nil)
 	c := newPublishTestController(mockDB, k8sClient)
-	err := c.publish(ctx, cluster, []byte(testAdminConf))
+	err := c.publish(ctx, cluster, adminKubeconfig{bytes: []byte(testAdminConf)})
 	require.Error(t, err)
 	assert.True(t, apierrors.IsNotFound(err), err)
 
@@ -1220,6 +1223,6 @@ func TestPublish_SkipsClusterThatStartsDeletingBeforeTheWrite(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(capiClusterFixture(cluster)).Build()
 	c := newPublishTestController(mockDB, k8sClient)
 
-	require.NoError(t, c.publish(ctx, cluster, []byte(testKubeconfig)))
+	require.NoError(t, c.publish(ctx, cluster, adminKubeconfig{bytes: []byte(testKubeconfig)}))
 	assertSecret(t, ctx, k8sClient, cluster, false)
 }

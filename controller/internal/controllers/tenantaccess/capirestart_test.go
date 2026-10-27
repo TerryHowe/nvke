@@ -5,6 +5,8 @@ package tenantaccess
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"testing"
 	"time"
 
@@ -246,11 +248,23 @@ func TestKubeconfigRotated(t *testing.T) {
 
 	published := []byte("published-kubeconfig")
 
+	const (
+		server    = "https://198.51.100.10:6443"
+		otherHost = "https://198.51.100.11:6443"
+		ca        = "cluster-ca"
+	)
+	nodeA := nodeKubeconfig(server, ca, "node-a-client-cert")
+	nodeB := nodeKubeconfig(server, ca, "node-b-client-cert")
+
 	tests := []struct {
 		name       string
 		secretName string
 		existing   []byte
-		kubeconfig []byte
+		// publishedBy is the source node recorded on the existing Secret.
+		publishedBy string
+		kubeconfig  []byte
+		// sourceNode is the node serving the kubeconfig being published.
+		sourceNode string
 		want       bool
 	}{
 		{
@@ -281,6 +295,69 @@ func TestKubeconfigRotated(t *testing.T) {
 			kubeconfig: published,
 			want:       false,
 		},
+		{
+			// The spurious roll: one flaked GetKubeconfig probe, or the
+			// lowest-UUID healthy candidate changing, republishes another
+			// node's admin.conf. Cluster API still holds node A's credential
+			// and node A's credential still works.
+			name:        "a different source node alone is not a rotation",
+			secretName:  KubeconfigSecretName(clusterName),
+			existing:    nodeA,
+			publishedBy: "node-a",
+			kubeconfig:  nodeB,
+			sourceNode:  "node-b",
+			want:        false,
+		},
+		{
+			name:        "the same source node with different bytes is a rotation",
+			secretName:  KubeconfigSecretName(clusterName),
+			existing:    nodeA,
+			publishedBy: "node-a",
+			kubeconfig:  nodeKubeconfig(server, ca, "node-a-rotated-cert"),
+			sourceNode:  "node-a",
+			want:        true,
+		},
+		{
+			// The server and the CA belong to the cluster, not to the node
+			// that served the file, so a change in either is a rotation
+			// however the source node moved.
+			name:        "a changed server is a rotation across source nodes",
+			secretName:  KubeconfigSecretName(clusterName),
+			existing:    nodeA,
+			publishedBy: "node-a",
+			kubeconfig:  nodeKubeconfig(otherHost, ca, "node-b-client-cert"),
+			sourceNode:  "node-b",
+			want:        true,
+		},
+		{
+			name:        "a changed CA is a rotation across source nodes",
+			secretName:  KubeconfigSecretName(clusterName),
+			existing:    nodeA,
+			publishedBy: "node-a",
+			kubeconfig:  nodeKubeconfig(server, "rotated-cluster-ca", "node-b-client-cert"),
+			sourceNode:  "node-b",
+			want:        true,
+		},
+		{
+			// Secrets published before the source node was recorded carry no
+			// annotation. Nothing can be ruled out about them, so they keep
+			// the old behavior.
+			name:       "a secret with no recorded source node is a rotation",
+			secretName: KubeconfigSecretName(clusterName),
+			existing:   nodeA,
+			kubeconfig: nodeB,
+			sourceNode: "node-b",
+			want:       true,
+		},
+		{
+			name:        "an unparseable published secret is a rotation",
+			secretName:  KubeconfigSecretName(clusterName),
+			existing:    []byte("{not a kubeconfig"),
+			publishedBy: "node-a",
+			kubeconfig:  nodeB,
+			sourceNode:  "node-b",
+			want:        true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -288,15 +365,19 @@ func TestKubeconfigRotated(t *testing.T) {
 			ctx := context.Background()
 			builder := fake.NewClientBuilder().WithScheme(capiRestartScheme(t))
 			if tt.existing != nil {
+				meta := metav1.ObjectMeta{Name: tt.secretName, Namespace: constants.LegacyManagementNamespace}
+				if tt.publishedBy != "" {
+					meta.Annotations = map[string]string{kubeconfigSourceNodeAnnotation: tt.publishedBy}
+				}
 				builder = builder.WithObjects(&corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Name: tt.secretName, Namespace: constants.LegacyManagementNamespace},
+					ObjectMeta: meta,
 					Data:       map[string][]byte{KubeconfigSecretKey: tt.existing},
 				})
 			}
 
 			c := newTestController(config.Config{}, &testutil.MockDB{}, builder.Build(), nil)
 
-			got, err := c.kubeconfigRotated(ctx, tt.secretName, tt.kubeconfig)
+			got, err := c.kubeconfigRotated(ctx, tt.secretName, tt.kubeconfig, tt.sourceNode)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
@@ -330,14 +411,65 @@ func TestUpsertKubeconfigSecretRollsCAPIOnRotation(t *testing.T) {
 	c.now = func() time.Time { return time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC) }
 
 	rotated := []byte("rotated-kubeconfig")
-	require.NoError(t, c.upsertKubeconfigSecret(ctx, cluster, KubeconfigSecretName(cluster.Name), rotated, constants.LabelValueKubeconfigModeAdmin))
+	require.NoError(t, c.upsertKubeconfigSecret(
+		ctx, cluster, KubeconfigSecretName(cluster.Name), rotated, constants.LabelValueKubeconfigModeAdmin, "node-a",
+	))
 
 	secret := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{
 		Name: KubeconfigSecretName(cluster.Name), Namespace: constants.LegacyManagementNamespace,
 	}, secret))
 	assert.Equal(t, rotated, secret.Data[KubeconfigSecretKey])
+	assert.Equal(t, "node-a", secret.Annotations[kubeconfigSourceNodeAnnotation], "the publish must record its source node")
 	assert.Equal(t, "2026-10-24T12:00:00Z", capiRestartedAtAnnotation(t, ctx, k8sClient))
+}
+
+// The spurious roll this gate exists to stop: a pass that reads a different
+// control-plane node republishes that node's admin.conf, which differs only in
+// the client certificate. Cluster API is holding the previous node's
+// credential, which still works, so rolling would drop every workload-cluster
+// informer on the site for nothing.
+func TestUpsertKubeconfigSecretDoesNotRollOnSourceNodeChange(t *testing.T) {
+	ctx := context.Background()
+	cluster := db.Cluster{ID: uuid.New(), Name: "tenant"}
+
+	mockDB := &testutil.MockDB{}
+	mockDB.On("GetCluster", mock.Anything, cluster.ID).Return(cluster, nil)
+
+	const server = "https://198.51.100.10:6443"
+	k8sClient := fake.NewClientBuilder().WithScheme(capiRestartScheme(t)).WithObjects(
+		capiClusterFixture(cluster),
+		capiDeploymentFixture(),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        KubeconfigSecretName(cluster.Name),
+				Namespace:   constants.LegacyManagementNamespace,
+				Annotations: map[string]string{kubeconfigSourceNodeAnnotation: "node-a"},
+			},
+			Data: map[string][]byte{
+				KubeconfigSecretKey: nodeKubeconfig(server, "cluster-ca", "node-a-client-cert"),
+			},
+		},
+	).Build()
+
+	c := newTestController(config.Config{TenantAccessEnabled: true}, mockDB, k8sClient, nil)
+	c.scheme = capiRestartScheme(t)
+
+	fromNodeB := nodeKubeconfig(server, "cluster-ca", "node-b-client-cert")
+	require.NoError(t, c.upsertKubeconfigSecret(
+		ctx, cluster, KubeconfigSecretName(cluster.Name), fromNodeB, constants.LabelValueKubeconfigModeAdmin, "node-b",
+	))
+
+	// The Secret still tracks whichever node answered, so a later rotation on
+	// node B is measured against node B.
+	secret := &corev1.Secret{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{
+		Name: KubeconfigSecretName(cluster.Name), Namespace: constants.LegacyManagementNamespace,
+	}, secret))
+	assert.Equal(t, fromNodeB, secret.Data[KubeconfigSecretKey])
+	assert.Equal(t, "node-b", secret.Annotations[kubeconfigSourceNodeAnnotation])
+
+	assert.Empty(t, capiRestartedAtAnnotation(t, ctx, k8sClient), "a source-node change must not roll Cluster API")
 }
 
 // Publishing a tenant kubeconfig for the first time must not roll Cluster API:
@@ -359,10 +491,34 @@ func TestUpsertKubeconfigSecretDoesNotRollOnFirstPublish(t *testing.T) {
 	c.scheme = capiRestartScheme(t)
 
 	require.NoError(t, c.upsertKubeconfigSecret(
-		ctx, cluster, KubeconfigSecretName(cluster.Name), []byte("first-kubeconfig"), constants.LabelValueKubeconfigModeAdmin,
+		ctx, cluster, KubeconfigSecretName(cluster.Name), []byte("first-kubeconfig"), constants.LabelValueKubeconfigModeAdmin, "node-a",
 	))
 
 	assert.Empty(t, capiRestartedAtAnnotation(t, ctx, k8sClient))
+}
+
+// nodeKubeconfig renders an admin.conf-shaped kubeconfig. The server and the CA
+// belong to the cluster; the client certificate belongs to the control-plane
+// node kubeadm issued the file on, which is what differs between two nodes of
+// one healthy cluster.
+func nodeKubeconfig(server, ca, clientCert string) []byte {
+	encode := base64.StdEncoding.EncodeToString
+	return fmt.Appendf(nil, `apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster:
+    server: %s
+    certificate-authority-data: %s
+contexts:
+- name: ctx
+  context: {cluster: c, user: u}
+current-context: ctx
+users:
+- name: u
+  user:
+    client-certificate-data: %s
+`, server, encode([]byte(ca)), encode([]byte(clientCert)))
 }
 
 // patchFailingClient fails Patch on demand so the restart failure path can be

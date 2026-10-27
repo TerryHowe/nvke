@@ -54,7 +54,7 @@ func TestPublishUsesConfiguredManagementNamespace(t *testing.T) {
 		nil,
 	)
 
-	require.NoError(t, c.publish(ctx, cluster, []byte(testAdminConf)))
+	require.NoError(t, c.publish(ctx, cluster, adminKubeconfig{bytes: []byte(testAdminConf)}))
 
 	secret := &corev1.Secret{}
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{

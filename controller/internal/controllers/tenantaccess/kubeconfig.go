@@ -49,24 +49,40 @@ func TrustBundleSecretName(clusterName string) string {
 	return clusterName + "-cluster-trust-bundle"
 }
 
+// adminKubeconfig is one control-plane node's admin.conf together with the node
+// that served it.
+//
+// The pairing matters because kubeadm issues each control-plane node its own
+// admin.conf with its own client certificate: two passes that read different
+// nodes produce different bytes for a cluster whose credentials never changed.
+// Carrying the source lets the publish path tell that apart from a real
+// rotation. See kubeconfigRotated.
+type adminKubeconfig struct {
+	bytes []byte
+	// sourceNode is the db.Node ID that served these bytes, as a string.
+	// Empty means the kubeconfig was not read from a node -- the SPIRE path
+	// builds its own, and tests pass bytes directly.
+	sourceNode string
+}
+
 // fetchAdminKubeconfig retrieves the verbatim admin.conf from a healthy
-// control-plane node via the agent GetKubeconfig RPC. The second return
-// value reports whether a ready control-plane node served a kubeconfig; when
-// false with a nil error, the cluster's control plane is not yet reachable and
-// the caller should skip this reconcile pass.
-func (c *Controller) fetchAdminKubeconfig(ctx context.Context, cluster db.Cluster) ([]byte, bool, error) {
+// control-plane node via the agent GetKubeconfig RPC, with the node that
+// served it. The second return value reports whether a ready control-plane
+// node served a kubeconfig; when false with a nil error, the cluster's control
+// plane is not yet reachable and the caller should skip this reconcile pass.
+func (c *Controller) fetchAdminKubeconfig(ctx context.Context, cluster db.Cluster) (adminKubeconfig, bool, error) {
 	controlPlaneNodes, err := c.db.ListNodes(ctx, db.NodeFilters{
 		ClusterID:    &cluster.ID,
 		ControlPlane: ptr.To(true),
 	})
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to list control plane nodes: %w", err)
+		return adminKubeconfig{}, false, fmt.Errorf("failed to list control plane nodes: %w", err)
 	}
 
 	candidates, healthyCandidates := nodes.PickControlPlaneRunbookCandidates(controlPlaneNodes)
 	if len(candidates) == 0 {
 		// Not-ready gate: no joined control-plane node exists yet.
-		return nil, false, nil
+		return adminKubeconfig{}, false, nil
 	}
 
 	// Probe the same node first on every pass. kubeadm issues each control-plane
@@ -91,10 +107,10 @@ func (c *Controller) fetchAdminKubeconfig(ctx context.Context, cluster db.Cluste
 			candidateErrs = append(candidateErrs, fmt.Errorf("node %s returned an empty kubeconfig", node.ID))
 			continue
 		}
-		return []byte(kubeconfigBytes), true, nil
+		return adminKubeconfig{bytes: []byte(kubeconfigBytes), sourceNode: node.ID.String()}, true, nil
 	}
 
-	return nil, false, fmt.Errorf("failed to extract kubeconfig from %d control plane candidates: %w", len(candidates), errors.Join(candidateErrs...))
+	return adminKubeconfig{}, false, fmt.Errorf("failed to extract kubeconfig from %d control plane candidates: %w", len(candidates), errors.Join(candidateErrs...))
 }
 
 // probeKubeconfig fetches one node's admin.conf under probeTimeout. It is a

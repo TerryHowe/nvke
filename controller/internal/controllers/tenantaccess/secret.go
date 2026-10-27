@@ -99,6 +99,12 @@ func upsertOwnedSecret(
 		for key, value := range desired.Labels {
 			secret.Labels[key] = value
 		}
+		if secret.Annotations == nil {
+			secret.Annotations = map[string]string{}
+		}
+		for key, value := range desired.Annotations {
+			secret.Annotations[key] = value
+		}
 		secret.Type = desired.Type
 		secret.OwnerReferences = desired.OwnerReferences
 		if secret.Data == nil {
