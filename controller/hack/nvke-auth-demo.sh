@@ -102,16 +102,30 @@ if [[ -z "${NVKE_CONTROLLER_NAMESPACE}" ]]; then
   # ConfigMap, then the one a site installed before the nvke rename keeps, else
   # the legacy one. Only a confirmed absence of all of them falls back.
   NVKE_CONTROLLER_NAMESPACE="cloud-workflow-engine"
+  ns_denial=""
+  ns_readable=false
   for candidate in nvke-controller nke-controller; do
-    found="$(
+    # --ignore-not-found covers absence, not denial. RBAC scoped to one
+    # namespace answers Forbidden for the other, so keep the denial and try
+    # the rest rather than stopping at it, the way nvkectl's search does.
+    if ! found="$(
       "${KUBECTL[@]}" get configmap "${NVKE_AUTH_CONFIGMAP}" -n "${candidate}" \
         --ignore-not-found -o name 2>&1
-    )" || die "cannot look up configmap ${candidate}/${NVKE_AUTH_CONFIGMAP}: ${found}"
+    )"; then
+      ns_denial="${ns_denial:-cannot look up configmap ${candidate}/${NVKE_AUTH_CONFIGMAP}: ${found}}"
+      continue
+    fi
+    ns_readable=true
     if grep -qx "configmap/${NVKE_AUTH_CONFIGMAP}" <<<"${found}"; then
       NVKE_CONTROLLER_NAMESPACE="${candidate}"
       break
     fi
   done
+  # Falling back needs a confirmed absence. Every candidate denied confirms
+  # nothing, so report the denial rather than guessing the legacy namespace.
+  if [[ "${ns_readable}" == false && -n "${ns_denial}" ]]; then
+    die "${ns_denial}"
+  fi
   export NVKE_CONTROLLER_NAMESPACE
 fi
 
