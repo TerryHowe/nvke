@@ -167,6 +167,8 @@ on GHCR and `nvke-controller-chart` on NVCR. Releases
 cut before this rename were promoted to `ghcr.io/dsx-ai-factory/nvke/nke-controller`,
 which stays in place so existing pins keep resolving; nothing is republished under the new
 name. A pin moves to `nvke-controller` only once its tag exists there.
+`qualify-e2e.yml` probes GHCR for `nvke-controller` first and falls back to `nke-controller`, so
+it qualifies releases from either side of the rename.
 
 The pull secret `svc-nke-ngc-imagepull` keeps its name. It is an NGC service account
 provisioned outside this repository, so a rename means re-provisioning it on every site in
