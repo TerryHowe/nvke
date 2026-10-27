@@ -219,6 +219,8 @@ If `cluster.cniName` is `ovn-kubernetes`, install Open vSwitch on every node:
 sudo apt-get install -y openvswitch-switch
 ```
 
+The NVKE reference node image uses NVIDIA's DOCA build of Open vSwitch, `doca-openvswitch-switch`, from the DOCA apt repository. The agent accepts either package.
+
 ## Step 2: Run Bootstrap on Init Node
 
 On the **init node only**:
