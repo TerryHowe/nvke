@@ -25,6 +25,7 @@ type files map[string]string
 func testOptions(dir string) localbundle.Options {
 	return localbundle.Options{
 		Dir:           dir,
+		Issuers:       []string{"keycloak", "entra", "cluster-sa"},
 		Actions:       []string{"getCluster", "deleteCluster", "listReleases"},
 		ResourceTypes: []string{"Cluster", "Collection"},
 	}
@@ -51,6 +52,8 @@ permit(principal, action == NVKE::Action::"listReleases", resource);
 `,
 		"roles.json":   `[` + reader + `]`,
 		"actions.json": `[` + readActions + `, ` + deleteCluster + `]`,
+		"roleMappings.json": `[{"issuer": "keycloak", "claim": {"name": "groups", "value": "readers"},
+  "grants": [{"type": "NVKE::Role", "id": "reader"}]}]`,
 	}
 }
 

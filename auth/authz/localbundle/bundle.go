@@ -4,6 +4,7 @@
 package localbundle
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,14 +32,23 @@ const (
 	// actionsFile holds the NVKE::Action entities: the API's actions and the
 	// action groups they belong to.
 	actionsFile = "actions.json"
+
+	// roleMappingsFile holds the role mappings: which callers hold which
+	// roles.
+	roleMappingsFile = "roleMappings.json"
 )
 
 // bundle is one load of the bundle files. It never changes after load.
 type bundle struct {
 	policies      *cedar.PolicySet
 	entities      types.EntityMap
+	mappings      roleMappings
 	actions       []string
 	resourceTypes []string
+
+	// hash is a SHA-256 over each file's length and content, in a fixed
+	// order, so a reload can tell whether the bundle changed.
+	hash [sha256.Size]byte
 }
 
 // policyName names a policy by its @id, or by cedar-go's positional ID.
@@ -61,19 +71,28 @@ func load(opts Options) (*bundle, error) {
 		return nil, err
 	}
 
-	source, err := os.ReadFile(filepath.Join(dir, policiesFile))
-	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", policiesFile, err)
+	raw := map[string][]byte{}
+	hash := sha256.New()
+	for _, file := range []string{policiesFile, rolesFile, actionsFile, roleMappingsFile} {
+		content, err := os.ReadFile(filepath.Join(dir, file))
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", file, err)
+		}
+		raw[file] = content
+		fmt.Fprintf(hash, "%d\n", len(content))
+		hash.Write(content)
 	}
-	policies, err := cedar.NewPolicySetFromBytes(policiesFile, source)
+
+	policies, err := cedar.NewPolicySetFromBytes(policiesFile, raw[policiesFile])
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", policiesFile, err)
 	}
 	b := &bundle{policies: policies, entities: types.EntityMap{}, actions: opts.Actions, resourceTypes: opts.ResourceTypes}
+	hash.Sum(b.hash[:0])
 
 	entityErrs := append(
-		loadEntities(filepath.Join(dir, rolesFile), roleType, b.entities),
-		loadEntities(filepath.Join(dir, actionsFile), actionType, b.entities)...,
+		loadEntities(rolesFile, raw[rolesFile], roleType, b.entities),
+		loadEntities(actionsFile, raw[actionsFile], actionType, b.entities)...,
 	)
 	errs := append(b.checkPolicies(), entityErrs...)
 	// The checks below need every entity. After an entity file fails, their
@@ -81,6 +100,9 @@ func load(opts Options) (*bundle, error) {
 	if len(entityErrs) == 0 {
 		errs = append(errs, b.checkEntities(opts.Actions)...)
 		errs = append(errs, b.checkNames()...)
+		if b.mappings, err = compileRoleMappings(raw[roleMappingsFile], b.entities, opts.Issuers); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
@@ -124,17 +146,12 @@ func (r entityRef) uid() types.EntityUID {
 	return types.NewEntityUID(types.EntityType(r.Type), types.String(r.ID))
 }
 
-// loadEntities adds the entities in path to dst. Every entity must have
-// entityType, and none may appear twice: a duplicate would replace the first,
-// so a repeated role with more parents would grant more. The file decodes
-// strictly, because a duplicate or misspelled "parents" key would drop
-// parents without an error.
-func loadEntities(path string, entityType types.EntityType, dst types.EntityMap) []error {
-	file := filepath.Base(path)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return []error{fmt.Errorf("reading %s: %w", file, err)}
-	}
+// loadEntities adds the entities in raw, the content of file, to dst. Every
+// entity must have entityType, and none may appear twice: a duplicate would
+// replace the first, so a repeated role with more parents would grant more.
+// The file decodes strictly, because a duplicate or misspelled "parents" key
+// would drop parents without an error.
+func loadEntities(file string, raw []byte, entityType types.EntityType, dst types.EntityMap) []error {
 	var entities []entityJSON
 	strictErrs, err := kjson.UnmarshalStrict(raw, &entities)
 	if err != nil {
