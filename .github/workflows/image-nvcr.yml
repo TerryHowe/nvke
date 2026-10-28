@@ -313,7 +313,7 @@ jobs:
   # Tags only. `main` keeps publishing to NVCR alone, so GHCR carries released
   # versions rather than every commit.
   #
-  # The destination is ghcr.io/dsx-ai-factory/nvke/nke-controller. Charts live under
+  # The destination is ghcr.io/dsx-ai-factory/nvke/nvke-controller. Charts live under
   # ghcr.io/dsx-ai-factory/nvke/charts, which is what keeps a chart and an image from
   # sharing one OCI repository -- on two of the CAPI repos they did, told apart
   # only by whether the tag carried a "v".
@@ -404,7 +404,7 @@ jobs:
           # rather than whatever the version tag resolves to now.
           digest="${INDEX_DIGEST}"
           src="nvcr.io/${NVKE_NGC_ORG}/nvke-controller@${digest}"
-          dst="ghcr.io/${GITHUB_REPOSITORY,,}/nke-controller"
+          dst="ghcr.io/${GITHUB_REPOSITORY,,}/nvke-controller"
 
           crane copy "${src}" "${dst}:${version}"
 

@@ -920,7 +920,8 @@ jobs:
           fi
 
           # The image path, resolved here so every later step reads one value.
-          # Same image names on both; only the prefix differs.
+          # Same image names on both except the controller on GHCR before the
+          # rename, resolved below; only the prefix differs.
           case "${SITE_IMAGE_REGISTRY}" in
             ghcr) images="ghcr.io/dsx-ai-factory/nvke" ;;
             nvcr)
@@ -1127,6 +1128,29 @@ jobs:
         with:
           version: ${{ steps.oras.outputs.version }}
 
+      # nvke-controller is the name everywhere now, but GHCR keeps releases from
+      # before the rename under nke-controller. Probed here, after the logins,
+      # because the GHCR package is private. site-inputs and the e2e config
+      # both read the result, which is what keeps the name on the node's
+      # archive and the name the Helm values ask for the same.
+      - name: Resolve the controller image name
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          repository=nvke-controller
+          if [ "${SITE_NVKE_CONTROLLER_BUILD}" != 1 ] && [ "${SITE_IMAGE_REGISTRY}" = ghcr ]; then
+            if docker manifest inspect "${SITE_IMAGES}/nvke-controller:${SITE_NVKE_CONTROLLER_VERSION}" >/dev/null 2>&1; then
+              :
+            elif docker manifest inspect "${SITE_IMAGES}/nke-controller:${SITE_NVKE_CONTROLLER_VERSION}" >/dev/null 2>&1; then
+              repository=nke-controller
+            else
+              echo "::error::${SITE_NVKE_CONTROLLER_VERSION} is on GHCR as neither nvke-controller nor nke-controller"
+              exit 1
+            fi
+          fi
+          echo "SITE_NVKE_CONTROLLER_REPOSITORY=${repository}" >> "${GITHUB_ENV}"
+          echo "controller image: ${SITE_IMAGES}/${repository}:${SITE_NVKE_CONTROLLER_VERSION}"
+
       # nvkectl for the node's architecture, the three image archives, and the
       # deploy path out of the checkout. The node has no access to this
       # repository, so everything it runs has to be built here and staged.
@@ -1144,6 +1168,7 @@ jobs:
           make -C controller/test/e2e site-inputs \
             SITE_NVKE_CONTROLLER_VERSION="${SITE_NVKE_CONTROLLER_VERSION}" \
             SITE_NVKE_CONTROLLER_BUILD="${SITE_NVKE_CONTROLLER_BUILD}" \
+            SITE_NVKE_CONTROLLER_REPOSITORY="${SITE_NVKE_CONTROLLER_REPOSITORY}" \
             SITE_ARCH="${SITE_ARCH}" \
             SITE_CLI_BUILD="${SITE_CLI_BUILD}" \
             SITE_CLI_VERSION="${CLI_VERSION}" \
@@ -1288,7 +1313,7 @@ jobs:
           site:
             images:
               controller:
-                repository: ${SITE_IMAGES}/nvke-controller
+                repository: ${SITE_IMAGES}/${SITE_NVKE_CONTROLLER_REPOSITORY}
                 archive: ${SITE_INPUTS}/controller.tar
               capi-provisioned:
                 repository: ${SITE_IMAGES}/cluster-api-provider-provisioned
