@@ -26,10 +26,11 @@ const (
 	// requests the legacy audience whatever version it reports, and
 	// agent_version does not gate this window.
 	//
-	// Gate: something selects NodeAgentAudience — the controller passing the
-	// flag per nodecontract.ForAgentVersion, or the default flipping — and the
-	// fleet has rolled onto it. Removed before that, every TLS/JWT node fails
-	// closed in controller/internal/agent/tlsjwt.go, which is enforcing-only.
+	// Gate: the controller selects NodeAgentAudience per node, tracked in
+	// #2039, and the fleet has rolled onto it. Flipping the agent's default
+	// instead is not the path; #1565 rejected that because it imposes a
+	// release order. Removed before the gate, every TLS/JWT node fails closed
+	// in controller/internal/agent/tlsjwt.go, which is enforcing-only.
 	NodeAgentAudienceLegacy = "nke-controller"
 )
 
