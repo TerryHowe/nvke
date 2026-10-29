@@ -18,12 +18,18 @@ const (
 	// NodeAgentAudience, so the controller accepts both whatever the release
 	// order.
 	//
-	// Removed in v0.25.0. Gate: every site's agents report an agent_version
-	// that requests NodeAgentAudience. The controller already records
-	// agent_version per node (controller/internal/db/nodes.go), so the sweep
-	// reads the fleet rather than assuming it. Dropped before the sweep, any
-	// agent still on the legacy audience fails closed in
-	// controller/internal/agent/tlsjwt.go, which is enforcing-only.
+	// Slated for v0.25.0, but nothing has opened the path to it yet. The agent
+	// picks its audience with --controller-audience, which defaults to this
+	// constant and falls back to it when empty (agent/cmd/agent/main.go), and
+	// nodeAgentBootstrapFiles never passes the flag
+	// (controller/internal/temporal/activities). So every TLS/JWT agent
+	// requests the legacy audience whatever version it reports, and
+	// agent_version does not gate this window.
+	//
+	// Gate: something selects NodeAgentAudience — the controller passing the
+	// flag per nodecontract.ForAgentVersion, or the default flipping — and the
+	// fleet has rolled onto it. Removed before that, every TLS/JWT node fails
+	// closed in controller/internal/agent/tlsjwt.go, which is enforcing-only.
 	NodeAgentAudienceLegacy = "nke-controller"
 )
 

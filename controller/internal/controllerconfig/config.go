@@ -775,7 +775,7 @@ func validateDiscoveryURL(issuerURL, discoveryURL string) error {
 // Role or ClusterRole names.
 //
 // "nke:" is removed in v0.25.0, which relaxes both and regenerates that
-// config. Gate: tenantaccess.pruneLegacyRBAC has run on all 41 sites, so that
+// config. Gate: tenantaccess.pruneLegacyRBAC has run on every site, so that
 // no platform-owned RBAC still carries the nke: name once a fleet-wide
 // provider may mint nke: usernames and groups. cli/internal/bootstrap/sitespec
 // and controller/test/e2e/internal/oidc each keep their own copy of this list,
