@@ -87,6 +87,19 @@ The E2E lane verifies these concrete mappings:
 also preserves a validated `dpu` or `vm` resource suffix, although this CAPD
 lane exercises the `bm/cwe` workload identities above.
 
+Like the real exchange, the mock also writes each component of the new subject
+as a claim. For the controller identity above:
+
+```json
+{
+  "dsx.nvidia.com/tenant": "nke",
+  "dsx.nvidia.com/region": "capd",
+  "dsx.nvidia.com/service": "nvke-controller",
+  "dsx.nvidia.com/partition": "nvid.id",
+  "dsx.nvidia.com/resource": [{"resource_type": "bm", "resource_id": "cwe"}]
+}
+```
+
 ## What the E2E lane proves
 
 The `identity-exchange` lifecycle asserts that:
