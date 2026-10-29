@@ -299,6 +299,11 @@ func bootstrapPortMappings(cweCfg controllerdeploy.Config) []bootstrapengine.Por
 
 func runBootstrapSite(ctx context.Context, out io.Writer, opts *bootstrapSiteOptions) (err error) {
 	logger := slog.Default().With("component", "bootstrap-site")
+	run := telemetry.RunFrom(ctx)
+	run.SetLogFields(operationBootstrapSite, "")
+	phases := newPhaseTracker(ctx)
+	ctx = phases.enter(phasePreflight, nil)
+	defer func() { phases.close(err) }()
 	for _, s := range envalias.Deprecated(bootstrapSettings()...) {
 		logger.Warn(s.Warning(), "deprecated", s.Old, "replacement", s.New)
 	}
@@ -308,6 +313,7 @@ func runBootstrapSite(ctx context.Context, out io.Writer, opts *bootstrapSiteOpt
 	if err != nil {
 		return err
 	}
+	run.SetLogFields(operationBootstrapSite, inv.ClusterName)
 	logger.Info("loaded site spec", "path", opts.siteSpec, "cluster", inv.ClusterName)
 	// Checked before the dry-run return so --dry-run is the complete pre-flight,
 	// and together so one run reports every problem.
@@ -439,7 +445,8 @@ func runBootstrapSite(ctx context.Context, out io.Writer, opts *bootstrapSiteOpt
 		}
 	}
 
-	logger.Info("creating ephemeral bootstrap kind cluster", "cluster", cfg.ClusterName)
+	ctx = phases.enter(phaseBootstrapCluster, nil)
+	logger.Info("creating ephemeral bootstrap kind cluster", "bootstrap_kind_cluster", cfg.ClusterName)
 	cluster, err := engine.Create(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("standing up bootstrap kind cluster: %w", err)
@@ -451,6 +458,9 @@ func runBootstrapSite(ctx context.Context, out io.Writer, opts *bootstrapSiteOpt
 	// is torn down.
 	handedOver := false
 	defer func() {
+		// Everything from here is cleanup after the run, so it is timed as the
+		// finish phase. On a failure this ends the phase that failed first.
+		ctx = phases.enter(phaseFinish, err)
 		// Collect diagnostics before anything is torn down: this cluster is
 		// removed on every exit path, so this is the only moment the evidence
 		// still exists. Only on failure, or on any outcome under -v: a
@@ -480,27 +490,36 @@ func runBootstrapSite(ctx context.Context, out io.Writer, opts *bootstrapSiteOpt
 		if opts.keepBootstrapKind || (siteClusterCreated && err != nil) {
 			if siteClusterCreated && err != nil {
 				logger.Warn("bootstrap failed after site cluster creation; retaining the bootstrap kind cluster for recovery",
-					"cluster", cluster.Name, "kubeconfig", cluster.KubeconfigPath)
+					"bootstrap_kind_cluster", cluster.Name, "kubeconfig", cluster.KubeconfigPath)
 			} else {
 				logger.Info("--keep-bootstrap-cluster set: leaving the bootstrap kind cluster running",
-					"cluster", cluster.Name, "kubeconfig", cluster.KubeconfigPath)
+					"bootstrap_kind_cluster", cluster.Name, "kubeconfig", cluster.KubeconfigPath)
 			}
 			return
 		}
-		logger.Info("tearing down bootstrap kind cluster", "cluster", cluster.Name)
+		logger.Info("tearing down bootstrap kind cluster", "bootstrap_kind_cluster", cluster.Name)
 		deleteCtx, cancelDelete := context.WithTimeout(
 			context.WithoutCancel(ctx), cleanupTimeout,
 		)
 		defer cancelDelete()
 		if deleteErr := engine.Delete(deleteCtx, cluster.Name); deleteErr != nil {
 			logger.Error("failed to tear down bootstrap kind cluster",
-				"cluster", cluster.Name, "err", deleteErr)
+				"bootstrap_kind_cluster", cluster.Name, "err", deleteErr)
+			// The teardown is part of finish, so it fails that phase. The command
+			// still returns err: a teardown failure is logged, not returned. When
+			// an earlier phase failed, err is that phase's, not finish's.
+			finishErr := deleteErr
+			if !phases.failed {
+				finishErr = errors.Join(err, deleteErr)
+			}
+			phases.leave(finishErr)
 		}
 	}()
 
 	// Step 3: deploy Postgres, Temporal, SPIRE, Cluster API, and the controller onto the bootstrap
 	// cluster and wait for the controller to report healthy on /readyz before going any
 	// further — there is nothing to dispatch a workflow to otherwise.
+	ctx = phases.enter(phaseEngineDeploy, nil)
 	if err := deployAndWaitForCWE(ctx, engine, cluster, cweCfg, opts.cweRunner, logger); err != nil {
 		return err
 	}
@@ -509,6 +528,7 @@ func runBootstrapSite(ctx context.Context, out io.Writer, opts *bootstrapSiteOpt
 	// kubeadm on each host through nvke-agent and reconciles the Cluster API
 	// objects that the provisioned infrastructure provider binds to the
 	// site spec's hosts.
+	ctx = phases.enter(phaseSiteCluster, nil)
 	siteClusterCreated, err = createSiteCluster(ctx, cluster, inv, opts, cweCfg.CWEPort, logger)
 	if err != nil && siteClusterCreated {
 		return retainedClusterError(err, inv, cluster, cweCfg.CWEPort)
@@ -532,6 +552,7 @@ func runBootstrapSite(ctx context.Context, out io.Writer, opts *bootstrapSiteOpt
 	}
 
 	handedOver = true
+	ctx = phases.enter(phaseFinish, nil)
 	kubeconfigPath := siteKubeconfigPath(inv.ClusterName, opts)
 	if inv.Cluster.EtcdEncryptionEnabled() {
 		fmt.Fprintf(out, "\nThe etcd encryption key of cluster %q is at %s. Move that file off this host "+
@@ -734,8 +755,7 @@ func createSiteCluster(
 
 	// Logged after the default is applied, so the line states the budget the
 	// command will actually keep to rather than the bare flag value.
-	logger.Info("waiting for the cluster to finish provisioning",
-		"cluster", created.Name, "timeout", timeout)
+	logger.Info("waiting for the cluster to finish provisioning", "cluster", created.Name, "timeout", timeout)
 
 	if _, err := sitecluster.WaitProvisioned(ctx, client, created.ID, time.Until(deadline), logger); err != nil {
 		return true, err
@@ -1281,7 +1301,7 @@ func deployAndWaitForCWE(
 	}
 
 	cwe := controllerdeploy.New(cweRunner, logger)
-	logger.Info("deploying the controller onto bootstrap kind cluster", "cluster", cluster.Name, "image", cweCfg.CWEImage)
+	logger.Info("deploying the controller onto bootstrap kind cluster", "bootstrap_kind_cluster", cluster.Name, "image", cweCfg.CWEImage)
 	if err := cwe.Deploy(ctx, cluster.KubeconfigPath, cweCfg); err != nil {
 		return fmt.Errorf("deploying the controller: %w", err)
 	}

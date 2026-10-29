@@ -16,6 +16,33 @@ debug detail or `--json-logs` for structured logs.
 nvkectl bootstrap site -f sitespec.yaml 2>&1 | tee bootstrap.log
 ```
 
+#### The phases
+
+The command runs in five phases, in this order: `preflight`,
+`bootstrap_cluster` (creating the Kind cluster), `engine_deploy` (deploying the
+controller), `site_cluster` (creating the site cluster and saving its outputs)
+and `finish` (making the control-plane nodes schedulable, with
+`infra.provider: nico` installing the NVKE stack on the site cluster, then
+collecting diagnostics and deleting the Kind cluster). When a phase ends, nvkectl logs one
+`phase finished` line with its `phase`, its `outcome` (`succeeded` or
+`failed`) and its `duration_ms`. Log lines also carry `operation`, `cluster`
+(once the site spec is loaded) and, while a phase runs, `phase`. The phase that
+failed is the one whose `phase finished` line says `outcome=failed`.
+
+```bash
+grep 'phase finished' bootstrap.log
+```
+
+A line looks like this (abridged):
+
+```text
+level=INFO msg="phase finished" phase=engine_deploy outcome=succeeded duration_ms=61234 trace_id=<trace-id> span_id=<span-id> operation=bootstrap_site cluster=nvke-site
+```
+
+`--dry-run` ends after `preflight`. `finish` also runs after a failure, once
+the Kind cluster exists, so a failed run logs the failed phase and then
+`finish`. A failure before the Kind cluster exists has no `finish` line.
+
 #### The trace ID
 
 Each attempt has its own trace ID. Include it when reporting a failure. It
@@ -48,7 +75,9 @@ node, run the same searches in two steps:
 nvkectl can send its spans and log records to an OpenTelemetry collector over
 OTLP/gRPC. Each carries the run's trace ID, so you can search the backend for
 the `Trace ID:` that nvkectl prints. What nvkectl writes to stderr does not
-change.
+change. Each [phase](#the-phases) is also a span named `phase.<name>`, a child
+of the run's root span, with `nvke.phase` and `nvke.outcome` attributes and an
+error status when it failed.
 
 ##### With environment variables
 
@@ -151,10 +180,10 @@ accepts the site cluster request and before the outputs are saved, or, with
 `infra.provider: nico`, when the create request got no answer, so the
 controller may have created the site cluster. A failed
 cleanup can also leave it behind. The logs report retention and, when
-available, the kubeconfig path.
+available, the kubeconfig path (abridged):
 
 ```text
-level=WARN msg="bootstrap failed after site cluster creation; retaining the bootstrap kind cluster for recovery" cluster=nvkectl-bootstrap kubeconfig=/tmp/nvkectl-bootstrap-kubeconfig-.../config
+level=WARN msg="bootstrap failed after site cluster creation; retaining the bootstrap kind cluster for recovery" bootstrap_kind_cluster=nvkectl-bootstrap kubeconfig=/tmp/nvkectl-bootstrap-kubeconfig-.../config trace_id=<trace-id> span_id=<span-id> operation=bootstrap_site cluster=nvke-site phase=finish
 ```
 
 If you set `OTEL_EXPORTER_OTLP_HEADERS`, the kept cluster also holds those
@@ -265,13 +294,14 @@ The final `Error:` identifies the phase and the failed step. If it names a
 command such as `helm ...: exit status 1`, read the command output that
 follows for the cause, such as a chart download error or a timeout.
 
-| Failure phase | Where to look first | Before retrying |
-|---|---|---|
-| Preflight | The error and the site spec; nothing has been created | Fix the reported problem |
-| Kind creation | `bootstrap-cluster-create-failure.txt` | Fix the cause and delete any leftover bootstrap cluster |
-| Controller deploy | Pod events and logs in the diagnostics directory; site nodes are untouched | Fix the cause and delete any leftover bootstrap cluster |
-| Site provisioning | Controller logs, then the affected node's agent and kubelet journals | Inspect the site and the retained bootstrap cluster; abandon the attempt only as described [below](#when-it-is-safe-to-run-bootstrap-again) |
-| Saving outputs or making nodes schedulable | The error's recovery instructions; the site cluster already exists | Recover the missing outputs or run the final command; do not bootstrap the existing cluster again |
+| Failure phase | Logged `phase` | Where to look first | Before retrying |
+|---|---|---|---|
+| Preflight | `preflight` | The error and the site spec; nothing has been created | Fix the reported problem |
+| Kind creation | `bootstrap_cluster` | `bootstrap-cluster-create-failure.txt` | Fix the cause and delete any leftover bootstrap cluster |
+| Controller deploy | `engine_deploy` | Pod events and logs in the diagnostics directory; site nodes are untouched | Fix the cause and delete any leftover bootstrap cluster |
+| Site provisioning | `site_cluster` | Controller logs, then the affected node's agent and kubelet journals | Inspect the site and the retained bootstrap cluster; abandon the attempt only as described [below](#when-it-is-safe-to-run-bootstrap-again) |
+| Saving outputs | `site_cluster` | The error's recovery instructions; the site cluster already exists | Recover the missing outputs; do not bootstrap the existing cluster again |
+| Making nodes schedulable | `finish` | The error's recovery instructions; the site cluster and its outputs exist | Run the final command; do not bootstrap the existing cluster again |
 
 ## Common failures
 
@@ -453,8 +483,6 @@ Something deleted the cluster through the controller's API while bootstrap was
 waiting. Check for another operator or automation using the same bootstrap
 cluster.
 
-### Finish
-
 **`tenant kubeconfig for "<name>" was not published within 2m0s`**
 
 The site cluster is provisioned, but bootstrap could not retrieve its
@@ -477,13 +505,7 @@ Keep the bootstrap cluster. Check the error for a failed Kubernetes read or
 file write. Recovery needs `clusterstaticentry-crd.yaml` and
 `clusterstaticentries.yaml` alongside the site kubeconfig when mTLS is enabled.
 
-**`making the control-plane nodes schedulable: ...`**
-
-The site cluster and its outputs are ready. Run the manual `kubectl taint`
-command printed in the error using the saved site kubeconfig. Do not run
-bootstrap again for this failure.
-
-### The encryption key was not saved
+#### The encryption key was not saved
 
 **`cluster "<name>" is up and its etcd data is encrypted, but its encryption key was not saved to <path>`**
 
@@ -501,6 +523,14 @@ Confirm the saved file contains the expected Secret, and keep it with the
 cluster's credentials before deleting the bootstrap cluster or resetting nodes.
 For backup and restore usage, see
 [Pre-Provisioned Nodes](../../docs/site-bootstrap/pre-provisioned-nodes.md#troubleshooting).
+
+### Finish
+
+**`making the control-plane nodes schedulable: ...`**
+
+The site cluster and its outputs are ready. Run the manual `kubectl taint`
+command printed in the error using the saved site kubeconfig. Do not run
+bootstrap again for this failure.
 
 ## When it is safe to run bootstrap again
 

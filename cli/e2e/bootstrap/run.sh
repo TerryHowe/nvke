@@ -246,7 +246,7 @@ scan_output_for_secrets() {
   # they must not allow. The hash is computed here, not written in this file: a
   # literal would trip the Secrets workflow just as it trips the default rules.
   fingerprint="$(printf '%s' sample | sha256sum | cut -d' ' -f1)"
-  printf 'time=x level=INFO msg="wrote the etcd encryption key" component=x path=/x/.etcd-encryption-key.json sha256=%s trace_id=%032x span_id=%016x\n' \
+  printf 'time=x level=INFO msg="wrote the etcd encryption key" component=x path=/x/.etcd-encryption-key.json sha256=%s trace_id=%032x span_id=%016x operation=bootstrap_site cluster=x phase=site_cluster\n' \
     "${fingerprint}" 1 1 >"${work}/clean/etcd-fingerprint.txt"
   printf 'time=x level=INFO msg="wrote the file" component=x path=/x/.etcd-encryption-key.json sha256=%s trace_id=%032x span_id=%016x\n' \
     "${fingerprint}" 1 1 >"${work}/flagged/etcd-other.txt"
@@ -257,7 +257,7 @@ scan_output_for_secrets() {
   # prove nothing.
   trace_hex="$(printf t | sha256sum | cut -c1-32)"
   span_hex="$(printf s | sha256sum | cut -c1-16)"
-  printf 'time=x level=INFO msg="SPIRE upstream CA from the environment" component=x cert=/w/cli/.local/spire-ca/ca.crt key=/w/cli/.local/spire-ca/ca.key trace_id=%s span_id=%s\n' \
+  printf 'time=x level=INFO msg="SPIRE upstream CA from the environment" component=x cert=/w/cli/.local/spire-ca/ca.crt key=/w/cli/.local/spire-ca/ca.key trace_id=%s span_id=%s operation=bootstrap_site cluster=x phase=preflight\n' \
     "${trace_hex}" "${span_hex}" >"${work}/clean/spire-ca-paths.txt"
   printf 'time=x level=INFO msg="SPIRE upstream CA from the environment" component=x cert=/w/cli/.local/spire-ca/ca.crt key=/w/cli/.local/spire-ca/ca.key trace_id=%s span_id=%s extra=%s\n' \
     "${trace_hex}" "${span_hex}" "${fingerprint}" >"${work}/flagged/spire-ca-extra.txt"

@@ -298,6 +298,7 @@ func setupLogging(verbose, jsonLogs bool, run *telemetry.Run) error {
 	opts := &slog.HandlerOptions{Level: level, ReplaceAttr: redact.ReplaceAttr}
 	var h slog.Handler
 	if jsonLogs {
+		opts.ReplaceAttr = utcTime(redact.ReplaceAttr)
 		h = slog.NewJSONHandler(os.Stderr, opts)
 	} else {
 		h = slog.NewTextHandler(os.Stderr, opts)
@@ -307,4 +308,14 @@ func setupLogging(verbose, jsonLogs bool, run *telemetry.Run) error {
 	}
 	slog.SetDefault(slog.New(h))
 	return nil
+}
+
+// utcTime wraps replace so the top-level time attribute is written in UTC.
+func utcTime(replace func([]string, slog.Attr) slog.Attr) func([]string, slog.Attr) slog.Attr {
+	return func(groups []string, attr slog.Attr) slog.Attr {
+		if len(groups) == 0 && attr.Key == slog.TimeKey && attr.Value.Kind() == slog.KindTime {
+			attr.Value = slog.TimeValue(attr.Value.Time().UTC())
+		}
+		return replace(groups, attr)
+	}
 }

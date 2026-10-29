@@ -123,7 +123,7 @@ description = "the etcd encryption key's fingerprint that nvkectl logs"
 targetRules = ["generic-api-key"]
 regexTarget = "line"
 regexes = [
-  '''(?m)^time=\S+ level=\S+ msg="wrote the etcd encryption key" component=\S+ path=\S+ sha256=[0-9a-f]{64}( trace_id=[0-9a-f]{32} span_id=[0-9a-f]{16})?$''',
+  '''(?m)^time=\S+ level=\S+ msg="wrote the etcd encryption key" component=\S+ path=\S+ sha256=[0-9a-f]{64}( trace_id=[0-9a-f]{32} span_id=[0-9a-f]{16}( operation=bootstrap_site cluster=\S+ phase=[a-z_]+)?)?$''',
 ]
 
 # nvkectl logs where the upstream SPIRE CA's certificate and key files are, when
@@ -136,7 +136,7 @@ description = "the paths of the upstream SPIRE CA files that nvkectl logs"
 targetRules = ["generic-api-key"]
 regexTarget = "line"
 regexes = [
-  '''(?m)^time=\S+ level=\S+ msg="SPIRE upstream CA from the environment" component=\S+ cert=\S+ key=\S+( trace_id=[0-9a-f]{32} span_id=[0-9a-f]{16})?$''',
+  '''(?m)^time=\S+ level=\S+ msg="SPIRE upstream CA from the environment" component=\S+ cert=\S+ key=\S+( trace_id=[0-9a-f]{32} span_id=[0-9a-f]{16}( operation=bootstrap_site cluster=\S+ phase=[a-z_]+)?)?$''',
 ]
 
 # Two more hashes the default generic-api-key rule reads as credentials.

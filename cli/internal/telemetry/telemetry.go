@@ -64,6 +64,9 @@ type Run struct {
 	tracerProvider  *sdktrace.TracerProvider
 	rootSpan        trace.Span // nil before Start and after Finish
 	rootSpanContext trace.SpanContext
+	phase           *phaseState // set by StartPhase until the phase ends
+	operation       string      // log fields set by SetLogFields
+	cluster         string
 }
 
 // sanitizeVersion returns version reduced to the characters of an RFC 9110
