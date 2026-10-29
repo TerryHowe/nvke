@@ -89,6 +89,9 @@ const (
 	// Identity namespaces a fleet-wide OIDC provider must not use as a
 	// usernamePrefix or groupsPrefix. kube-apiserver rejects system, kubeadm,
 	// nke, and nvidia; nvke is reserved the same way.
+	//
+	// oidcPrefixNKE is removed in v0.25.0 with the "nke:" entry of
+	// controllerconfig.ReservedIdentityPrefixes, which states the gate.
 	oidcPrefixSystem  = "system:"
 	oidcPrefixKubeadm = "kubeadm:"
 	oidcPrefixNKE     = "nke:"

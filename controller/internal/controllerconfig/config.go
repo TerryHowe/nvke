@@ -767,6 +767,12 @@ func validateDiscoveryURL(issuerURL, discoveryURL string) error {
 // Kubernetes, kubeadm, NVKE and NVIDIA own. kube-apiserver rejects any identity
 // a fleet-wide provider maps into one, and Validate refuses a provider whose
 // own prefix already lies inside one, since every login through it would fail.
+//
+// "nke:" is removed in v0.25.0. Gate: tenantaccess.pruneLegacyRBAC has run on
+// all 41 sites. Un-reserving it earlier lets a tenant create an nke:-prefixed
+// ClusterRole that then collides with the nke:cwe objects the prune deletes.
+// cli/internal/bootstrap/sitespec and controller/test/e2e/internal/oidc each
+// keep their own copy of this list and move with it.
 func ReservedIdentityPrefixes() []string {
 	return []string{"system:", "kubeadm:", "nke:", "nvke:", "nvidia:"}
 }

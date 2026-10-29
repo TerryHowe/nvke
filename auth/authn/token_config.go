@@ -16,7 +16,14 @@ const (
 	NodeAgentAudience   = "nvke-controller"
 	// NodeAgentAudienceLegacy is the audience agents request until they move to
 	// NodeAgentAudience, so the controller accepts both whatever the release
-	// order. Remove it with the other dual-accept windows.
+	// order.
+	//
+	// Removed in v0.25.0. Gate: every site's agents report an agent_version
+	// that requests NodeAgentAudience. The controller already records
+	// agent_version per node (controller/internal/db/nodes.go), so the sweep
+	// reads the fleet rather than assuming it. Dropped before the sweep, any
+	// agent still on the legacy audience fails closed in
+	// controller/internal/agent/tlsjwt.go, which is enforcing-only.
 	NodeAgentAudienceLegacy = "nke-controller"
 )
 
