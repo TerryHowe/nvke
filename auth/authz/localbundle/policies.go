@@ -28,7 +28,7 @@ func (b *bundle) sortedPolicies() []cedar.PolicyID {
 // context.issuer.
 //
 // The request's principal and resource have no attributes, and neither do
-// the entities in the entity files. A condition reading one never holds, so a
+// the actions and roles. A condition reading one never holds, so a
 // forbid guarded by `resource has site` never applies, and the permit it was
 // written to limit wins.
 func (b *bundle) checkPolicies() []error {
@@ -109,7 +109,8 @@ func describeRead(receiver ast.IsNode, attribute string) string {
 //   - The principal scope compares with NVKE::Principal using == or is, and
 //     with NVKE::Role using in. The action scope names actions, and the
 //     resource scope names API resource types.
-//   - Every action and role named is declared.
+//   - Every action named is one of the API's actions, and every role named
+//     is declared in roles.json.
 //
 // It also refuses a role that no policy names, directly or through a role
 // it's nested in. Such a role, or a policy naming an undeclared one, grants
@@ -140,8 +141,10 @@ func (b *bundle) checkNames() []error {
 				continue
 			}
 			named[uid] = true
-			if _, declared := b.entities[uid]; !declared {
-				problems = append(problems, fmt.Sprintf("names %s, which no entity file declares", uid))
+			if _, declared := b.entities[uid]; !declared && uid.Type == actionType {
+				problems = append(problems, fmt.Sprintf("names %s, which isn't one of the API's actions", uid))
+			} else if !declared {
+				problems = append(problems, fmt.Sprintf("names %s, which %s doesn't declare", uid, rolesFile))
 			}
 		}
 		for _, p := range problems {

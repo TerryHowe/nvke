@@ -63,8 +63,8 @@ func TestReload(t *testing.T) {
 	assert.True(t, reload(allowDeletes()), "policies.cedar changed")
 	assert.Equal(t, authz.OutcomeAllow, outcome(t, lb), "the new bundle is live")
 	assert.True(t, reload(files{"roles.json": `[` + reader + `]` + "\n"}), "changing only roles.json counts as a change")
-	assert.True(t, reload(files{"roleMappings.json": `[{"issuer": "entra", "claim": {"name": "groups", "value": "readers"}, ` +
-		grantsReader + `}]`}), "changing only roleMappings.json counts as a change")
+	assert.True(t, reload(files{"authorization.yaml": validBundle()["authorization.yaml"] + "\n"}),
+		"changing only authorization.yaml counts as a change")
 
 	writeBundle(t, dir, files{"roles.json": `[]`})
 	changed, err := lb.Reload()

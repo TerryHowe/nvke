@@ -2,12 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package localbundle is the LocalBundle authorization backend. It evaluates
-// Cedar policy from a bundle of files the deployer mounts, usually from a
-// ConfigMap: the policies, the roles, the actions and the role mappings.
+// Cedar policy from policies.cedar, roles.json and authorization.yaml, which
+// the deployer mounts, usually from a ConfigMap. An example authorization.yaml:
 //
-// A caller holds the roles that matching role mappings grant. LocalBundle
-// gives no caller a tenant, so it allows only a request for a global
-// resource.
+//	apiVersion: auth.nvke.nvidia.com/v1alpha1
+//	kind: AuthorizationConfiguration
+//	operatorTenant: nca-0000000000000000
+//	issuers:
+//	  keycloak:
+//	    tenant: {claim: organization}
+//	    claims:
+//	      - {name: groups, value: readers, grants: [reader]}
+//	  cluster-sa:
+//	    tenant: {fixed: nca-0000000000000000}
+//	    operators: true
+//	    serviceAccounts:
+//	      - {namespace: nvke-ops, name: fleet, grants: [admin]}
+//
+// The actions are the API's actions, from Options.Actions. A caller holds the
+// roles of every claim and service account mapping it matches. A caller from
+// an issuer authorization.yaml doesn't list has no tenant and no roles. A
+// caller in the operator tenant is an operator if its issuer sets operators,
+// and is refused as an impostor otherwise.
 package localbundle
 
 import (
@@ -40,20 +56,20 @@ const (
 
 // Options configures a LocalBundle.
 type Options struct {
-	// Dir holds the bundle files: policies.cedar, roles.json, actions.json
-	// and roleMappings.json. A mounted ConfigMap changes them all at once. A
+	// Dir holds the bundle files: policies.cedar, roles.json and
+	// authorization.yaml. A mounted ConfigMap changes them all at once. A
 	// plain directory must be changed the same way, or a reload can load
 	// files from two versions.
 	Dir string
 
-	// Issuers are the issuer names in the authN config. The load fails if a
-	// role mapping names any other issuer, because the mapping would match
-	// nobody.
+	// Issuers are the issuer names in the authN config. The load fails if
+	// authorization.yaml names any other issuer, because no caller would
+	// come from it.
 	Issuers []string
 
-	// Actions are the actions the API asks about. New fails if actions.json
-	// lacks one, because the bundle would refuse that action to every caller,
-	// or makes one an action group. Authorize refuses any other action.
+	// Actions are the actions the API asks about. The bundle has one Cedar
+	// action for each, with no action groups. The load fails if a policy
+	// names any other action, and Authorize returns an error for one.
 	Actions []string
 
 	// ResourceTypes are the types of the resources the API asks about, such
@@ -78,8 +94,12 @@ type LocalBundle struct {
 var _ authz.Authorizer = (*LocalBundle)(nil)
 
 // New loads and checks the bundle in opts.Dir. Unless a file can't be read
-// or parsed, the error reports every problem found.
+// or parsed, the error reports every problem found. New copies opts' slices,
+// so a later change to them doesn't change the LocalBundle.
 func New(opts Options) (*LocalBundle, error) {
+	opts.Issuers = slices.Clone(opts.Issuers)
+	opts.Actions = slices.Clone(opts.Actions)
+	opts.ResourceTypes = slices.Clone(opts.ResourceTypes)
 	if len(opts.Actions) == 0 || len(opts.ResourceTypes) == 0 {
 		return nil, errors.New("the API's actions and resource types must both be set")
 	}
@@ -136,8 +156,9 @@ func (lb *LocalBundle) bundle() (*bundle, error) {
 	return b, nil
 }
 
-// Authorize runs the isolation check, grants roles from the role mappings,
-// then evaluates the policies.
+// Authorize finds the caller's tenant and operator status as
+// authorization.yaml says, refuses an impostor, runs the isolation check,
+// grants roles from authorization.yaml, then evaluates the policies.
 func (lb *LocalBundle) Authorize(_ context.Context, q authz.Query) (authz.Decision, error) {
 	b, err := lb.bundle()
 	if err != nil {
@@ -146,12 +167,17 @@ func (lb *LocalBundle) Authorize(_ context.Context, q authz.Query) (authz.Decisi
 	if err := q.Validate(); err != nil {
 		return authz.Decision{}, err
 	}
-	// Every caller has no tenant and isn't an operator.
-	var caller authz.Caller
-	if refusal := authz.CheckIsolation(caller, q.Resource); refusal != "" {
+	caller, refusal := b.config.callerOf(q.Principal)
+	if refusal == "" {
+		refusal = authz.CheckIsolation(caller, q.Resource)
+	}
+	// A refusal here has no Reasons, because no policy decided it.
+	if refusal != "" {
 		return authz.Decision{Outcome: refusal, Caller: caller}, nil
 	}
-	return b.decide(q, b.mappings.rolesFor(q.Principal))
+	d, err := b.decide(q, b.config.rolesFor(q.Principal))
+	d.Caller = caller
+	return d, err
 }
 
 // decide evaluates q against the policies, with the principal holding roles.
