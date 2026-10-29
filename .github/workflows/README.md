@@ -67,6 +67,13 @@ an existing stacked PR may still carry the workflow from its current merge ref.
 When changing the aggregate trigger, state the rollout boundary in the PR and
 verify existing stacks rather than claiming immediate retroactive coverage.
 
+A member's post-merge `main` run is a canary nobody is watching, so
+`main-health-check.yml` sweeps those runs every half hour and files one tracking
+issue while any member is red. It reads the member list out of `merge-gate.yml`,
+so a member added or removed there needs no edit to it. A red `main` blocks
+every open pull request at once: `gate` is required and each PR builds against
+its own merge ref.
+
 ## Adding a required gate member
 
 First confirm that the job belongs in the required gate:
