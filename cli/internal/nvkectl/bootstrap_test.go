@@ -1550,7 +1550,7 @@ func TestRunBootstrapSiteRetainsClusterWhenKeyCaptureFails(t *testing.T) {
 		"kubeconfig is at " + kubeconfigOut,
 		"do not delete it",
 		"umask 077 && kubectl --kubeconfig",
-		"-n nke-controller get secret etcd-encryption-key-",
+		"-n nvke-controller get secret etcd-encryption-key-",
 		"-o json > " + keyOut,
 	} {
 		if !strings.Contains(err.Error(), want) {

@@ -199,8 +199,9 @@ is enabled. When it is off or absent, as for a controller that reads
 `AUTH_CONFIG_PATH`, the CLI falls back to the authentication ConfigMap:
 `nvke-auth-config` first, then `nke-auth-config`, which a site installed before
 the `nvke` rename keeps by pinning `apiAuth.configMap.name`. Each pair of names
-is searched in `nke-controller` and then `cloud-workflow-engine`, and the first
-*readable* one is used.
+is searched in `nvke-controller`, then `nke-controller` for a site installed
+before the `nvke` rename, then `cloud-workflow-engine`, and the first *readable*
+one is used.
 
 Readable matters because RBAC scoped to `resourceNames` denies the names it does
 not grant: a site that grants `get` on its pinned name alone answers Forbidden
