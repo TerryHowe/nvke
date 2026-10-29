@@ -120,10 +120,12 @@ token:NKECluster|nkecluster|NKENodePool|nkenodepool|nkeClusterRef|NKEValidatedNo
 # that tells an operator which name their site keeps.
 token:nke-rbac
 
-# The nke: ClusterRole prefix the tenant apiserver reserves, and the nke:cwe
-# objects an earlier release applied, which tenantaccess prunes by name. The
-# reserved prefix goes in v0.25.0 (controllerconfig.ReservedIdentityPrefixes
-# names its gate); the entry stays for the pruned object names.
+# The nke: identity prefix the tenant apiserver reserves in its CEL
+# user-validation rules, and the nke:cwe objects an earlier release applied,
+# which tenantaccess prunes by name. The two are unrelated mechanisms that
+# share a spelling. The reserved prefix goes in v0.25.0
+# (controllerconfig.ReservedIdentityPrefixes names its gate); the entry stays
+# for the pruned object names.
 token:^nke:
 
 # SPIFFE caller paths and the ClusterSPIFFEID, the client identities, and the
