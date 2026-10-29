@@ -789,8 +789,9 @@ without it the lane is skipped:
 
 - `provision`: provision the node over the site's jump host and check its egress.
 - `bootstrap`: also run `nvkectl bootstrap site` and wait for the API server.
-- `full`: also deploy the SBOM stack, wait for CWE, check that NKTP delivers the
-  site's telemetry (below), then create and delete a tenant.
+- `deployment`: also deploy the SBOM stack, wait for CWE, and check that NKTP
+  delivers the site's telemetry (below). Takes one machine; no tenant is built.
+- `full`: also create and delete a tenant.
 
 At `full` the lane runs the [validation image](#validation-image)'s site checks,
 1–31 in [What it checks](#what-it-checks), against the site it built. The
@@ -806,14 +807,17 @@ a broken site does not wait out every later check.
 
 Both lanes create the same `nico-forge` tenant and both entries carry that
 label, so pick between them with `site-controller`, which only the lane that
-builds a site carries. Measured against this tree with `-ginkgo.dry-run` and
+builds a site carries. At `full` the site lane also registers one tenant entry
+per dialect, so the filter has to exclude the ones belonging to other
+providers by name. Measured against this tree with `-ginkgo.dry-run` and
 `-e2e.site-stage=full`:
 
 | label filter | specs | which |
 |---|---|---|
 | `nico-forge && !site-controller` | 42 | the tenant, against the site controller in the kube context |
-| `site-controller` | 80 | the lane that builds a site, tenant included |
+| `site-controller && !nico-dsx` | 80 | the lane that builds a site, its own tenant included |
 | `nico-forge` | 84 | both |
+| `site-controller` | 122 | the site lane carrying every dialect's tenant, and so the foreign one that fails the run |
 
 `-e2e.site-stage`, not the label, is what decides whether a machine is
 provisioned: the site lane's tenant entries are built only when it is set, so
@@ -833,40 +837,43 @@ filed under in `environments/dsx.yaml`:
 
 ```bash
 export SSA_ISSUER=…                                  # issuer BASE url; the
-export DSX_REDSTONE_DEV1_DH2_SSA_CLIENT_ID=…         # suite appends /token
-export DSX_REDSTONE_DEV1_DH2_SSA_CLIENT_SECRET=…     # 15-minute TTL
-export DSX_REDSTONE_DEV1_DH2_JUMP_HOST=…             # the rest are identifiers
-export DSX_REDSTONE_DEV1_DH2_SITE_ID=… DSX_REDSTONE_DEV1_DH2_TENANT_ID=…
-export DSX_REDSTONE_DEV1_DH2_VPC_ID=… DSX_REDSTONE_DEV1_DH2_VPC_PREFIX_ID=…
-export DSX_REDSTONE_DEV1_DH2_SSH_KEY_GROUP_ID=… DSX_REDSTONE_DEV1_DH2_INSTANCE_TYPE_ID=…
+export DSX_DATAHALL_1_SSA_CLIENT_ID=…         # suite appends /token
+export DSX_DATAHALL_1_SSA_CLIENT_SECRET=…     # 15-minute TTL
+export DSX_DATAHALL_1_JUMP_HOST=…             # the rest are identifiers
+export DSX_DATAHALL_1_API=…                   # required; the datahall's host
+export DSX_DATAHALL_1_SITE_ID=… DSX_DATAHALL_1_TENANT_ID=…
+export DSX_DATAHALL_1_VPC_ID=… DSX_DATAHALL_1_VPC_PREFIX_ID=…
+export DSX_DATAHALL_1_SSH_KEY_GROUP_ID=… DSX_DATAHALL_1_INSTANCE_TYPE_ID=…
 ```
 
 There is no cluster fallback: an unset client fails the run naming both
 variables. The names derive from the datahall key, so a credential scoped to
 one datahall cannot be picked up by a run against another.
 
-Use `-e2e.site-stage=provision` or `bootstrap`. `full` is refused before a
-machine is taken: its tenant half decodes the environment as a Forge
-declaration, which a DSX one is not.
+Every stage runs, `full` included: the datahall has its own tenant spec, so a
+`full` run builds the site and then a control plane and a worker on it. The
+site lane registers one tenant entry per dialect and each decodes the
+environment strictly, so a hand-run selects its own with
+`-ginkgo.label-filter="site-controller && !nico-forge"`; the workflow does the
+same from the provider it resolved.
 
-redstone-dev1-dh2 is **arm64 only**, and an absent `arch` capability defaults
-to amd64, so a hand-run has to ask for arm64 and stage arm64 OS images --- the
-command above passes no `-e2e.capabilities` and would fail in `Resolve` with
-"no declared site offers a amd64 CPU shape":
+The DSX datahall is **amd64 only**, which is what an absent `arch` capability
+already defaults to, so the capability below is explicit rather than required.
+Stage amd64 OS images to match:
 
 ```bash
 go test -timeout 5h . -args \
   -ginkgo.label-filter=site-controller -ginkgo.v \
   -e2e.config=e2e-config.yaml -e2e.environment=dsx -e2e.site-stage=provision \
-  -e2e.capabilities=arch=arm64 \
-  -e2e.versions=controller=<…>,os-image=<arm64 url>,os-image-bootloader=<arm64 url>,…
+  -e2e.capabilities=arch=amd64 \
+  -e2e.versions=controller=<…>,os-image=<amd64 url>,os-image-bootloader=<amd64 url>,…
 ``` Build the inputs, then run; with the `site-inputs` defaults
 no `site:` block is needed at all:
 
 ```bash
 gmake site-inputs SITE_NVKE_CONTROLLER_VERSION=$(git rev-parse --short=12 HEAD)
 go test -timeout 5h . -args \
-  -ginkgo.label-filter=site-controller -ginkgo.v \
+  -ginkgo.label-filter="site-controller && !nico-dsx" -ginkgo.v \
   -e2e.config=e2e-config.yaml -e2e.environment=forge -e2e.site-stage=full \
   -e2e.versions=controller=<the same value>,os-image-bootloader=<url>,os-image=<url>,capi-provisioned=<version>,kube=<version>,cni-ovn=<version>,kind=<version>,clusterctl=<version>,nerdctl=<version>
 ```

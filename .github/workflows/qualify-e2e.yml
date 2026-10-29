@@ -90,13 +90,14 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: How far to go. provision stops at a booted node, bootstrap adds vanilla Kubernetes, full adds the deploy path and a tenant.
+        description: How far to go. provision stops at a booted node, bootstrap adds vanilla Kubernetes, deployment adds the deploy path, full adds a tenant.
         type: choice
         required: true
         default: full
         options:
           - provision
           - bootstrap
+          - deployment
           - full
       nvke-version:
         description: "The nvke tag to qualify, e.g. v0.22.0-beta.1. It must be an existing tag. QUALIFY_E2E_NVKE_VERSION supplies it when this is empty, and the plan takes the highest nke version when neither is set."
@@ -121,6 +122,10 @@ on:
         required: false
       cli-version:
         description: Overrides the nvkectl release the plan resolves, e.g. v0.1.0-rc.7 (the cli/<version> GitHub Release).
+        type: string
+        required: false
+      deploy-path-ref:
+        description: "The commit the deploy path is exported from. Empty follows the controller version, which is what a qualification wants: the deploy path carries the controller's own chart and the two have to agree. Set it only when the deploy path is under development and the controller predates it."
         type: string
         required: false
       capi-provisioned-version:
@@ -537,7 +542,20 @@ jobs:
     # images with NGC_API_KEY (see "Check every artifact the plan names" and
     # "Log in to NVCR" below), so it needs the same approval a real run does.
     # Only Teleport and the suite itself skip on a dry run, not the gate.
-    environment: ${{ github.event_name == 'push' && 'forge-nightly' || 'forge' }}
+    #
+    # The DSX arm is first because a job gets one environment and the
+    # datahall's identifiers live on `dsx`, not repository-wide: a run that
+    # took `forge` would read them as empty, and an unset identifier skips the
+    # site rather than failing, so the lane would report "no declared site
+    # offers" -- a missing variable wearing the costume of missing hardware.
+    # The scope the plan resolved, not a second derivation of it: the env
+    # context is unavailable here but `needs` is, and re-deriving drops
+    # SCOPE's own precedence -- a push ignores QUALIFY_E2E_SCOPE and the l40s
+    # label outranks it, so either would attach `dsx` to a Forge run.
+    environment: >-
+      ${{ (needs.plan.outputs.scope == 'dsx' && 'dsx')
+          || (github.event_name == 'push' && 'forge-nightly')
+          || 'forge' }}
     # Composed of two budgets that used to be separate jobs: up to 90 minutes
     # waiting for a commit-resolved plan's publishers (see "Check every
     # artifact the plan names"), plus the run budget below. Measured phases
@@ -588,12 +606,14 @@ jobs:
       # run and a tag push carry no dispatch input, and a beta that stopped at
       # a booted node would have qualified none of what it was cut for.
       #
-      # provision for the DSX label: it takes the node, reaches it, and
-      # releases it, which is what redstone-dev1-dh2 can place --- one machine
-      # is bound to its instance type, and a full run places three at once.
-      # A DSX run at full is refused by the suite before a machine is taken
-      # anyway, its tenant half speaking Forge only. See SCOPE in the plan job.
-      SITE_STAGE: ${{ inputs.stage || (github.event.label.name == 'qualify-e2e-dsx' && 'provision') || (github.event_name != 'push' && vars.QUALIFY_E2E_STAGE) || 'full' }}
+      # The DSX label carried its own provision default while the datahall
+      # bound one machine and the suite had no DSX tenant spec. Neither holds:
+      # the datahall binds eight, and the tenant spec landed with #1879, so DSX
+      # defaults to full with everything else. The variable still sits ahead of
+      # the default, so a lane pins a shorter stage in its own environment
+      # rather than through a repository-wide override, which is what collides
+      # with every other run in flight.
+      SITE_STAGE: ${{ inputs.stage || (github.event_name != 'push' && vars.QUALIFY_E2E_STAGE) || 'full' }}
       DRY_RUN: ${{ needs.plan.outputs.dry-run }}
       # Whether this run's ref is one the nvke WIF provider in the testgrid
       # repo actually trusts (main, or a v<digit> tag -- see wif-nvke.tf
@@ -614,13 +634,26 @@ jobs:
       # names it, because nvkectl is published as one artifact per platform and
       # the cli version below names none of them.
       CLI_REF: ${{ matrix.cli_ref }}
-      SITE_NVKE_CONTROLLER_VERSION: ${{ matrix.controller }}
+      # The plan's controller, unless a stream's environment names another.
+      # QUALIFY_E2E_CONTROLLER_VERSION cannot do this: it feeds the plan, which
+      # runs under ci-shared, so it is repository-wide and lands on every
+      # concurrent run. This one is read here, where the environment the stream
+      # selected is attached, so a value set on dsx is invisible to forge.
+      #
+      # It overrides what is INSTALLED, not what the plan RECORDS, so a run
+      # using it reports the plan's controller while the node runs another.
+      # That is a deliberate hole for bringing up a lane against an unreleased
+      # controller; a qualification anyone relies on sets nothing here.
+      SITE_NVKE_CONTROLLER_VERSION: ${{ vars.QUALIFY_E2E_SITE_CONTROLLER_VERSION || matrix.controller }}
       # How the controller's version was resolved, and the commit a described
       # one was taken at. Together they say what the deploy path is exported
       # from, which is a tag for one and a commit for the other.
       NVKE_CONTROLLER_VERSION_STRATEGY: ${{ matrix.controller_version_strategy }}
       PLAN_COMMIT: ${{ needs.plan.outputs.commit }}
       CLI_VERSION: ${{ matrix.cli }}
+      # The commit the deploy path is exported from. Empty follows the
+      # controller; see the site block in "Write the e2e config".
+      SITE_DEPLOY_PATH_REF: ${{ inputs.deploy-path-ref || vars.QUALIFY_E2E_DEPLOY_PATH_REF }}
       # The name the controller is installed under, which the deploy path
       # decides. Empty leaves the suite on its default, nvke-controller; a
       # release cut before the nvke rename installs nke-controller and needs
@@ -739,15 +772,21 @@ jobs:
       # beside the rest, and everything else is a variable naming
       # infrastructure rather than granting anything.
       DSX_ORG_ID: ${{ vars.DSX_ORG_ID }}
-      DSX_REDSTONE_DEV1_DH2_SITE_ID: ${{ vars.DSX_REDSTONE_DEV1_DH2_SITE_ID }}
-      DSX_REDSTONE_DEV1_DH2_TENANT_ID: ${{ vars.DSX_REDSTONE_DEV1_DH2_TENANT_ID }}
-      DSX_REDSTONE_DEV1_DH2_VPC_ID: ${{ vars.DSX_REDSTONE_DEV1_DH2_VPC_ID }}
-      DSX_REDSTONE_DEV1_DH2_VPC_PREFIX_ID: ${{ vars.DSX_REDSTONE_DEV1_DH2_VPC_PREFIX_ID }}
-      DSX_REDSTONE_DEV1_DH2_SSH_KEY_GROUP_ID: ${{ vars.DSX_REDSTONE_DEV1_DH2_SSH_KEY_GROUP_ID }}
-      DSX_REDSTONE_DEV1_DH2_INSTANCE_TYPE_ID: ${{ vars.DSX_REDSTONE_DEV1_DH2_INSTANCE_TYPE_ID }}
-      DSX_REDSTONE_DEV1_DH2_NODE_USER: ${{ vars.DSX_REDSTONE_DEV1_DH2_NODE_USER }}
-      DSX_REDSTONE_DEV1_DH2_TELEPORT_LOGIN: ${{ vars.DSX_REDSTONE_DEV1_DH2_TELEPORT_LOGIN }}
-      DSX_REDSTONE_DEV1_DH2_JUMP_HOST: ${{ secrets.DSX_REDSTONE_DEV1_DH2_JUMP_HOST }}
+      # The datahall's API host. Not part of the key, so environments/dsx.yaml
+      # names no datahall --- and a secret rather than a variable, because
+      # GitHub prints job-level env in every step's log header and only a
+      # secret is masked there. As a variable the hostname, which carries the
+      # datahall's name, was published in the log of every DSX run.
+      DSX_DATAHALL_1_API: ${{ secrets.DSX_DATAHALL_1_API }}
+      DSX_DATAHALL_1_SITE_ID: ${{ vars.DSX_DATAHALL_1_SITE_ID }}
+      DSX_DATAHALL_1_TENANT_ID: ${{ vars.DSX_DATAHALL_1_TENANT_ID }}
+      DSX_DATAHALL_1_VPC_ID: ${{ vars.DSX_DATAHALL_1_VPC_ID }}
+      DSX_DATAHALL_1_VPC_PREFIX_ID: ${{ vars.DSX_DATAHALL_1_VPC_PREFIX_ID }}
+      DSX_DATAHALL_1_SSH_KEY_GROUP_ID: ${{ vars.DSX_DATAHALL_1_SSH_KEY_GROUP_ID }}
+      DSX_DATAHALL_1_INSTANCE_TYPE_ID: ${{ vars.DSX_DATAHALL_1_INSTANCE_TYPE_ID }}
+      DSX_DATAHALL_1_NODE_USER: ${{ vars.DSX_DATAHALL_1_NODE_USER }}
+      DSX_DATAHALL_1_TELEPORT_LOGIN: ${{ vars.DSX_DATAHALL_1_TELEPORT_LOGIN }}
+      DSX_DATAHALL_1_JUMP_HOST: ${{ secrets.DSX_DATAHALL_1_JUMP_HOST }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -887,7 +926,7 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # FORGE_JUMP_HOST and DSX_REDSTONE_DEV1_DH2_JUMP_HOST are secrets, so
+          # FORGE_JUMP_HOST and DSX_DATAHALL_1_JUMP_HOST are secrets, so
           # the log masks them without being asked. Nothing else here needs
           # masking: every other identifier names infrastructure rather than
           # granting anything.
@@ -988,14 +1027,30 @@ jobs:
           # filename directly: -e2e.environment names a file, not a backend,
           # and collapsing the two would rule out a second environment for
           # one provider -- a staging Forge beside the production one.
+          #
+          # tenant_exclude is the other half of the same mapping. At
+          # -e2e.site-stage full the site lane registers one tenant entry per
+          # dialect and selects them all with one label filter, so an entry
+          # built for another provider reaches this run and fails: each site
+          # declaration decodes strictly, and a DSX environment is "unknown
+          # field api" to Forge's decoder (the reverse holds too). Naming what
+          # to leave out keeps the site-level specs, which carry
+          # site-controller and no nico-* label and would be dropped by a
+          # filter that required one.
+          #
+          # A provider added here needs a tenant_exclude on every other arm as
+          # well as its own. That is the cost of excluding by name; the arms
+          # are at least all in this one block, and an unknown provider
+          # already fails below rather than running the wrong tenant.
           case "${PROVIDER}" in
-            forge) environment=forge ;;
-            dsx)   environment=dsx ;;
+            forge) environment=forge; tenant_exclude=nico-dsx ;;
+            dsx)   environment=dsx;   tenant_exclude=nico-forge ;;
             "")    echo "::error::the stream names no provider capability"; exit 1 ;;
             *)     echo "::error::provider is ${PROVIDER}, which this workflow has no environment for"; exit 1 ;;
           esac
           echo "SITE_ENVIRONMENT=${environment}" >> "${GITHUB_ENV}"
-          echo "environment: ${environment}"
+          echo "SITE_TENANT_EXCLUDE=${tenant_exclude}" >> "${GITHUB_ENV}"
+          echo "environment: ${environment}, tenant entries excluded: ${tenant_exclude}"
 
           # Joined here rather than taken as a string, so each key is set and
           # validated on its own. Empty keys are left out: the suite reads an
@@ -1312,6 +1367,12 @@ jobs:
           nvkectl:
             binary: ${SITE_NVKECTL}
           site:
+            # Empty follows the controller version, which is what a
+            # qualification wants: the deploy path carries the controller's own
+            # chart and the two have to agree. It is set only when the deploy
+            # path itself is under development and the controller predates it,
+            # which is the one case the field exists for.
+            deployPathRef: "${SITE_DEPLOY_PATH_REF}"
             images:
               controller:
                 repository: ${SITE_IMAGES}/${SITE_NVKE_CONTROLLER_REPOSITORY}
@@ -1365,6 +1426,7 @@ jobs:
           IN_OS_IMAGE_AMD64: ${{ inputs.os-image-amd64 }}
           IN_OS_IMAGE_BOOTLOADER_ARM64: ${{ inputs.os-image-bootloader-arm64 }}
           IN_OS_IMAGE_ARM64: ${{ inputs.os-image-arm64 }}
+          IN_DEPLOY_PATH_REF: ${{ inputs.deploy-path-ref }}
           IN_NVKE_VERSION: ${{ inputs.nvke-version }}
           IN_SCOPE: ${{ inputs.scope }}
           IN_DRY_RUN: ${{ inputs.dry-run }}
@@ -1392,6 +1454,8 @@ jobs:
           VAR_OS_IMAGE_AMD64: ${{ vars.QUALIFY_E2E_OS_IMAGE_AMD64 }}
           VAR_OS_IMAGE_BOOTLOADER_ARM64: ${{ vars.QUALIFY_E2E_OS_IMAGE_BOOTLOADER_ARM64 }}
           VAR_OS_IMAGE_ARM64: ${{ vars.QUALIFY_E2E_OS_IMAGE_ARM64 }}
+          VAR_DEPLOY_PATH_REF: ${{ vars.QUALIFY_E2E_DEPLOY_PATH_REF }}
+          VAR_SITE_CONTROLLER_VERSION: ${{ vars.QUALIFY_E2E_SITE_CONTROLLER_VERSION }}
           VAR_NODE_USER: ${{ vars.QUALIFY_E2E_NODE_USER }}
           VAR_NVKE_VERSION: ${{ vars.QUALIFY_E2E_NVKE_VERSION }}
           VAR_SCOPE: ${{ vars.QUALIFY_E2E_SCOPE }}
@@ -1415,6 +1479,8 @@ jobs:
           rows=(
             "stage|SITE_STAGE|IN_STAGE|VAR_STAGE|QUALIFY_E2E_STAGE"
             "controller version|SITE_NVKE_CONTROLLER_VERSION|IN_CONTROLLER_VERSION|VAR_CONTROLLER_VERSION|QUALIFY_E2E_CONTROLLER_VERSION"
+            "controller installed|SITE_NVKE_CONTROLLER_VERSION||VAR_SITE_CONTROLLER_VERSION|QUALIFY_E2E_SITE_CONTROLLER_VERSION"
+            "deploy path ref|SITE_DEPLOY_PATH_REF|IN_DEPLOY_PATH_REF|VAR_DEPLOY_PATH_REF|QUALIFY_E2E_DEPLOY_PATH_REF"
             "nvkectl version|CLI_VERSION|IN_CLI_VERSION|VAR_CLI_VERSION|QUALIFY_E2E_CLI_VERSION"
             "nvkectl artifact|SITE_CLI_REF|||"
             "dry run|DRY_RUN|IN_DRY_RUN||"
@@ -1453,15 +1519,16 @@ jobs:
             "cpu arch|ARCH|||"
             "gpu model|GPU|||"
             "DSX org|DSX_ORG_ID||DSX_ORG_ID|DSX_ORG_ID"
-            "DSX jump host|DSX_REDSTONE_DEV1_DH2_JUMP_HOST|||"
-            "DSX site|DSX_REDSTONE_DEV1_DH2_SITE_ID||DSX_REDSTONE_DEV1_DH2_SITE_ID|DSX_REDSTONE_DEV1_DH2_SITE_ID"
-            "DSX tenant|DSX_REDSTONE_DEV1_DH2_TENANT_ID||DSX_REDSTONE_DEV1_DH2_TENANT_ID|DSX_REDSTONE_DEV1_DH2_TENANT_ID"
-            "DSX VPC|DSX_REDSTONE_DEV1_DH2_VPC_ID||DSX_REDSTONE_DEV1_DH2_VPC_ID|DSX_REDSTONE_DEV1_DH2_VPC_ID"
-            "DSX VPC prefix|DSX_REDSTONE_DEV1_DH2_VPC_PREFIX_ID||DSX_REDSTONE_DEV1_DH2_VPC_PREFIX_ID|DSX_REDSTONE_DEV1_DH2_VPC_PREFIX_ID"
-            "DSX SSH key group|DSX_REDSTONE_DEV1_DH2_SSH_KEY_GROUP_ID||DSX_REDSTONE_DEV1_DH2_SSH_KEY_GROUP_ID|DSX_REDSTONE_DEV1_DH2_SSH_KEY_GROUP_ID"
-            "DSX instance type|DSX_REDSTONE_DEV1_DH2_INSTANCE_TYPE_ID||DSX_REDSTONE_DEV1_DH2_INSTANCE_TYPE_ID|DSX_REDSTONE_DEV1_DH2_INSTANCE_TYPE_ID"
-            "DSX Teleport login|DSX_REDSTONE_DEV1_DH2_TELEPORT_LOGIN||DSX_REDSTONE_DEV1_DH2_TELEPORT_LOGIN|DSX_REDSTONE_DEV1_DH2_TELEPORT_LOGIN"
-            "DSX node user|DSX_REDSTONE_DEV1_DH2_NODE_USER||DSX_REDSTONE_DEV1_DH2_NODE_USER|DSX_REDSTONE_DEV1_DH2_NODE_USER"
+            "DSX jump host|DSX_DATAHALL_1_JUMP_HOST|||"
+            "DSX api|DSX_DATAHALL_1_API|||"
+            "DSX site|DSX_DATAHALL_1_SITE_ID||DSX_DATAHALL_1_SITE_ID|DSX_DATAHALL_1_SITE_ID"
+            "DSX tenant|DSX_DATAHALL_1_TENANT_ID||DSX_DATAHALL_1_TENANT_ID|DSX_DATAHALL_1_TENANT_ID"
+            "DSX VPC|DSX_DATAHALL_1_VPC_ID||DSX_DATAHALL_1_VPC_ID|DSX_DATAHALL_1_VPC_ID"
+            "DSX VPC prefix|DSX_DATAHALL_1_VPC_PREFIX_ID||DSX_DATAHALL_1_VPC_PREFIX_ID|DSX_DATAHALL_1_VPC_PREFIX_ID"
+            "DSX SSH key group|DSX_DATAHALL_1_SSH_KEY_GROUP_ID||DSX_DATAHALL_1_SSH_KEY_GROUP_ID|DSX_DATAHALL_1_SSH_KEY_GROUP_ID"
+            "DSX instance type|DSX_DATAHALL_1_INSTANCE_TYPE_ID||DSX_DATAHALL_1_INSTANCE_TYPE_ID|DSX_DATAHALL_1_INSTANCE_TYPE_ID"
+            "DSX Teleport login|DSX_DATAHALL_1_TELEPORT_LOGIN||DSX_DATAHALL_1_TELEPORT_LOGIN|DSX_DATAHALL_1_TELEPORT_LOGIN"
+            "DSX node user|DSX_DATAHALL_1_NODE_USER||DSX_DATAHALL_1_NODE_USER|DSX_DATAHALL_1_NODE_USER"
             "site-2 site|FORGE_SITE_2_SITE_ID||FORGE_SITE_2_SITE_ID|FORGE_SITE_2_SITE_ID"
             "site-2 VPC|FORGE_SITE_2_VPC_ID||FORGE_SITE_2_VPC_ID|FORGE_SITE_2_VPC_ID"
             "site-2 VPC prefix|FORGE_SITE_2_VPC_PREFIX_ID||FORGE_SITE_2_VPC_PREFIX_ID|FORGE_SITE_2_VPC_PREFIX_ID"
@@ -1541,7 +1608,7 @@ jobs:
                 source="dispatch input"
               elif [ "${input}" = IN_CONTROLLER_NAME ] && [ -n "${IN_CWE_NAME:-}" ]; then
                 source="dispatch input cwe-name (deprecated, rename to controller-name)"
-              elif { [ "${EVENT_LABEL:-}" = qualify-e2e-dsx ] && { [ "${resolved}" = SITE_STAGE ] || [ "${resolved}" = SCOPE ]; }; } ||
+              elif { [ "${EVENT_LABEL:-}" = qualify-e2e-dsx ] && [ "${resolved}" = SCOPE ]; } ||
                    { [ "${EVENT_LABEL:-}" = qualify-e2e-l40s ] && [ "${resolved}" = SCOPE ]; }; then
                 # The label names these outright, ahead of the variables, so it
                 # is what produced the value whenever it is the trigger.
@@ -1641,8 +1708,8 @@ jobs:
           # artifact upload. The identifiers stay at job level because the
           # provenance step reads them back by name.
           SSA_ISSUER: ${{ secrets.SSA_ISSUER }}
-          DSX_REDSTONE_DEV1_DH2_SSA_CLIENT_ID: ${{ secrets.DSX_REDSTONE_DEV1_DH2_SSA_CLIENT_ID }}
-          DSX_REDSTONE_DEV1_DH2_SSA_CLIENT_SECRET: ${{ secrets.DSX_REDSTONE_DEV1_DH2_SSA_CLIENT_SECRET }}
+          DSX_DATAHALL_1_SSA_CLIENT_ID: ${{ secrets.DSX_DATAHALL_1_SSA_CLIENT_ID }}
+          DSX_DATAHALL_1_SSA_CLIENT_SECRET: ${{ secrets.DSX_DATAHALL_1_SSA_CLIENT_SECRET }}
           # JUMP_HOST_PASSWORD is deliberately absent: its presence is what
           # switches the suite off the Teleport relay and onto plain SSH.
         run: |
@@ -1683,6 +1750,7 @@ jobs:
           if [ "${DRY_RUN}" = "true" ]; then
             {
               echo "dry run: ginkgo is not run. It would have run with:"
+              echo "  -ginkgo.label-filter=site-controller && !${SITE_TENANT_EXCLUDE}"
               echo "  -e2e.site-stage=${SITE_STAGE}"
               echo "  -e2e.versions=controller=${SITE_NVKE_CONTROLLER_VERSION},cli=${CLI_VERSION},capi-provisioned=${CAPI_PROVISIONED_VERSION},${OS_IMAGE_VERSIONS}"
               echo "  -e2e.capabilities=${CAPABILITIES}"
@@ -1690,7 +1758,7 @@ jobs:
             } | tee qualify-e2e.log
           else
             go test -v -timeout 220m . -args \
-              -ginkgo.label-filter=site-controller \
+              -ginkgo.label-filter="site-controller && !${SITE_TENANT_EXCLUDE}" \
               -ginkgo.timeout=150m \
               -ginkgo.v \
               -ginkgo.fail-on-empty \
