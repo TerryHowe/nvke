@@ -71,8 +71,9 @@ A member's post-merge `main` run is a canary nobody is watching, so
 `main-health-check.yml` sweeps those runs every half hour and files one tracking
 issue while any member is red. It reads the member list out of `merge-gate.yml`,
 so a member added or removed there needs no edit to it. A red `main` blocks
-every open pull request at once: `gate` is required and each PR builds against
-its own merge ref.
+every pull request whose merge ref contains the failing commit: `gate` is
+required and each PR builds against its own merge ref. A stack based on a
+branch that predates the failure is unaffected until it rebases.
 
 ## Adding a required gate member
 

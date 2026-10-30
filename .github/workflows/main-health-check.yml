@@ -129,28 +129,54 @@ jobs:
               },
             );
 
-            // Newest COMPLETED run per member. A lane that is re-running has its
-            // previous verdict read instead, so a re-run in flight cannot read
-            // as a pass.
+            // Newest CONCLUSIVE run per member. A lane that is re-running has
+            // its previous verdict read instead, so a re-run in flight cannot
+            // read as a pass. `cancelled` and `skipped` prove nothing either --
+            // concurrency cancels runs constantly and a path filter skips them
+            // -- and they are dropped HERE rather than after the fact, so an
+            // inconclusive run newer than a failure cannot displace it.
+            const CONCLUSIVE = ['success', 'failure', 'timed_out'];
             const newest = new Map();
             for (const run of runs) {
-              if (!members.has(run.path) || run.status !== 'completed') continue;
-              const seen = newest.get(run.path);
-              if (!seen || run.created_at > seen.created_at) newest.set(run.path, run);
+              // The REST docs give `path` as `.github/workflows/build.yml@main`
+              // for a referenced workflow; a push run in this repo carries the
+              // bare path. Strip either way -- a mismatch here reads as green.
+              const path = run.path.split('@')[0];
+              if (!members.has(path) || run.status !== 'completed') continue;
+              if (!CONCLUSIVE.includes(run.conclusion)) continue;
+              const seen = newest.get(path);
+              if (!seen || run.created_at > seen.created_at) newest.set(path, run);
             }
 
-            // `cancelled` and `skipped` prove nothing: concurrency cancels runs
-            // constantly and a path filter skips them. Neither is a red main.
             const failed = [...newest.values()]
               .filter((run) => ['failure', 'timed_out'].includes(run.conclusion))
               .sort((a, b) => a.name.localeCompare(b.name));
 
+            // A member with no conclusive run in the window is UNKNOWN, not
+            // green: a newly added lane, or one whose path filter leaves its
+            // last run past the window. Reporting green on that is the silent
+            // pass this workflow exists to catch, so the issue is held open.
+            const unknown = [...members].filter((path) => !newest.has(path)).sort();
+
+            // Found by MARKER alone, not by label: the labels are triager-
+            // editable, and losing one would strand the open issue and file a
+            // second alongside it. listForRepo also returns pull requests.
             const open = await github.paginate(github.rest.issues.listForRepo, {
-              ...context.repo, state: 'open', labels: 'area/ci-build', per_page: 100,
+              ...context.repo, state: 'open', per_page: 100,
             });
-            const tracking = open.find((issue) => (issue.body ?? '').includes(MARKER));
+            const tracking = open.find(
+              (issue) => !issue.pull_request && (issue.body ?? '').includes(MARKER),
+            );
 
             if (failed.length === 0) {
+              if (unknown.length > 0) {
+                core.warning(
+                  `no conclusive \`main\` run for ${unknown.length} required member` +
+                    `${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}. ` +
+                    'Reporting unknown rather than green.',
+                );
+                return;
+              }
               if (!tracking) {
                 core.info(`main is green across ${newest.size} required members`);
                 return;
@@ -182,9 +208,11 @@ jobs:
               '',
               lanes,
               '',
-              '`gate` requires every member to report `success`, and every open pull request ' +
-                'builds against `refs/pull/<n>/merge`. Until this is green, no pull request can ' +
-                'merge on its own checks, whatever it changes.',
+              '`gate` requires every member to report `success`, and a pull request builds ' +
+                'against `refs/pull/<n>/merge`. Until this is green, no pull request whose ' +
+                'merge ref contains the failing commit can merge on its own checks, whatever ' +
+                'it changes. A stack based on a branch that predates the failure is ' +
+                'unaffected until it rebases.',
               '',
               `Filed and closed by [main-health-check.yml](${workflow}). It closes itself once ` +
                 'every member is green again, and its body is rewritten each sweep, so it always ' +
