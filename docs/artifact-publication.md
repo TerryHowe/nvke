@@ -471,6 +471,22 @@ For security patches that cannot wait for the next regular release:
 For release candidates, append `-rc.N` to the version: `v0.2.0-rc.1`, or
 `cli/v0.2.0-rc.1` for one component. Tag and push the same way.
 
+A root release candidate can also be cut without anyone pushing it. When the
+Qualify e2e run a nightly beta tag started passes every stream at scope
+`golden-path` and stage `full`, `.github/workflows/rc-promotion.yml` tags
+the beta's commit as the next `vX.Y.Z-rc.N` of the beta's version. A dispatched
+or pull request run of Qualify e2e never promotes, and a re-run does not tag a
+beta that an RC already names. It pushes only while the `NVKE_AUTO_RC`
+repository variable is `true`; otherwise the run summary says what it would
+have tagged.
+
+Unlike an RC a person pushes with `git tag -s`, the automatic RC is an unsigned
+lightweight tag, as the nightly betas are: the workflow has no key to sign
+with. It marks a candidate that qualified, not a release, so `git verify-tag`
+does not apply to it. The signed annotated tag
+[RELEASE.md](../RELEASE.md#publish-and-verify) requires is for the approved
+release, which the release owner creates.
+
 **The dot in `-rc.N` is load-bearing.** `.github/workflows/release.yml` marks
 the release as a pre-release by looking for `-rc.`, so `v0.2.0-rc1` without it
 would publish as a full release and take the repository's "Latest release"
