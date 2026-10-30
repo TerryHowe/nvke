@@ -135,7 +135,10 @@ jobs:
             // concurrency cancels runs constantly and a path filter skips them
             // -- and they are dropped HERE rather than after the fact, so an
             // inconclusive run newer than a failure cannot displace it.
-            const CONCLUSIVE = ['success', 'failure', 'timed_out'];
+            // `startup_failure` is a verdict: the workflow file itself did not
+            // parse, so the lane ran nothing and the gate cannot pass.
+            const FAILING = ['failure', 'timed_out', 'startup_failure'];
+            const CONCLUSIVE = ['success', ...FAILING];
             const newest = new Map();
             for (const run of runs) {
               // The REST docs give `path` as `.github/workflows/build.yml@main`
@@ -148,8 +151,28 @@ jobs:
               if (!seen || run.created_at > seen.created_at) newest.set(path, run);
             }
 
+            // A member whose last `main` run fell outside the window above gets
+            // one targeted lookup rather than being carried as unknown until it
+            // next runs. At most one call per missing member, and only a lane
+            // that has genuinely never concluded on `main` stays unknown.
+            for (const path of members) {
+              if (newest.has(path)) continue;
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                ...context.repo,
+                workflow_id: path.split('/').pop(),
+                branch: 'main',
+                event: 'push',
+                status: 'completed',
+                per_page: 30,
+              });
+              const run = data.workflow_runs.find((candidate) =>
+                CONCLUSIVE.includes(candidate.conclusion),
+              );
+              if (run) newest.set(path, run);
+            }
+
             const failed = [...newest.values()]
-              .filter((run) => ['failure', 'timed_out'].includes(run.conclusion))
+              .filter((run) => FAILING.includes(run.conclusion))
               .sort((a, b) => a.name.localeCompare(b.name));
 
             // A member with no conclusive run in the window is UNKNOWN, not
@@ -158,25 +181,34 @@ jobs:
             // pass this workflow exists to catch, so the issue is held open.
             const unknown = [...members].filter((path) => !newest.has(path)).sort();
 
-            // Found by MARKER alone, not by label: the labels are triager-
-            // editable, and losing one would strand the open issue and file a
-            // second alongside it. listForRepo also returns pull requests.
+            // Found by MARKER, not by label: the labels are triager-editable,
+            // and losing one would strand the open issue and file a second
+            // alongside it. The author check is there because the marker is
+            // plain text in the body a person can copy into an issue of their
+            // own; `type` rather than a literal login, so changing the token
+            // this runs under cannot orphan the issue. listForRepo also returns
+            // pull requests.
             const open = await github.paginate(github.rest.issues.listForRepo, {
               ...context.repo, state: 'open', per_page: 100,
             });
             const tracking = open.find(
-              (issue) => !issue.pull_request && (issue.body ?? '').includes(MARKER),
+              (issue) => !issue.pull_request &&
+                issue.user?.type === 'Bot' &&
+                (issue.body ?? '').includes(MARKER),
             );
 
-            if (failed.length === 0) {
-              if (unknown.length > 0) {
-                core.warning(
-                  `no conclusive \`main\` run for ${unknown.length} required member` +
-                    `${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}. ` +
-                    'Reporting unknown rather than green.',
-                );
-                return;
-              }
+            const workflow = `https://github.com/${context.repo.owner}/${context.repo.repo}` +
+              '/blob/main/.github/workflows/main-health-check.yml';
+            const footer = `Filed and closed by [main-health-check.yml](${workflow}). It closes ` +
+              'itself once every member is green again, and its body is rewritten each sweep, so ' +
+              'it always names the lanes failing or unverified now.';
+            const unknownLanes = unknown.map((path) => `- \`${path}\``).join('\n');
+
+            // Green is every member conclusive AND none of them failing. An
+            // unknown member holds the issue open, but the body is rewritten
+            // first -- otherwise it goes on naming lanes that have since gone
+            // green, for as long as the unknown lane takes to run.
+            if (failed.length === 0 && unknown.length === 0) {
               if (!tracking) {
                 core.info(`main is green across ${newest.size} required members`);
                 return;
@@ -196,41 +228,79 @@ jobs:
               return;
             }
 
-            const lanes = failed.map((run) =>
-              `- **${run.name}** — ${run.conclusion} on [\`${run.head_sha.slice(0, 9)}\`](${run.html_url})`,
-            ).join('\n');
-            const workflow = `https://github.com/${context.repo.owner}/${context.repo.repo}` +
-              '/blob/main/.github/workflows/main-health-check.yml';
-            const body = [
-              MARKER,
-              `${failed.length} required gate member${failed.length === 1 ? ' is' : 's are'} ` +
-                'failing on `main`:',
-              '',
-              lanes,
-              '',
-              '`gate` requires every member to report `success`, and a pull request builds ' +
-                'against `refs/pull/<n>/merge`. Until this is green, no pull request whose ' +
-                'merge ref contains the failing commit can merge on its own checks, whatever ' +
-                'it changes. A stack based on a branch that predates the failure is ' +
-                'unaffected until it rebases.',
-              '',
-              `Filed and closed by [main-health-check.yml](${workflow}). It closes itself once ` +
-                'every member is green again, and its body is rewritten each sweep, so it always ' +
-                'names the lanes failing now.',
-            ].join('\n');
-            const title = `main is red: ${failed.map((run) => run.name).join(', ')}`;
+            let title;
+            let body;
+            if (failed.length > 0) {
+              const lanes = failed.map((run) =>
+                `- **${run.name}** — ${run.conclusion} on [\`${run.head_sha.slice(0, 9)}\`](${run.html_url})`,
+              ).join('\n');
+              title = `main is red: ${failed.map((run) => run.name).join(', ')}`;
+              body = [
+                MARKER,
+                `${failed.length} required gate member${failed.length === 1 ? ' is' : 's are'} ` +
+                  'failing on `main`:',
+                '',
+                lanes,
+                ...(unknown.length === 0 ? [] : [
+                  '',
+                  `${unknown.length} further member${unknown.length === 1 ? ' has' : 's have'} no ` +
+                    'conclusive `main` run, so ' +
+                    `${unknown.length === 1 ? 'its state is' : 'their states are'} unknown:`,
+                  '',
+                  unknownLanes,
+                ]),
+                '',
+                '`gate` requires every member to report `success`, and a pull request builds ' +
+                  'against `refs/pull/<n>/merge`. Until this is green, no pull request whose ' +
+                  'merge ref contains the failing commit can merge on its own checks, whatever ' +
+                  'it changes. A stack based on a branch that predates the failure is ' +
+                  'unaffected until it rebases.',
+                '',
+                footer,
+              ].join('\n');
+            } else {
+              // Nothing is failing, but not everything has reported. Held open
+              // rather than filed: a lane that has never concluded on `main` is
+              // a new lane, and a P0 for one is noise.
+              core.warning(
+                `no conclusive \`main\` run for ${unknown.length} required member` +
+                  `${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}. ` +
+                  'Reporting unknown rather than green.',
+              );
+              if (!tracking) {
+                core.info('no tracking issue open; nothing to hold open');
+                return;
+              }
+              title = `main health unknown: ${unknown.join(', ')}`;
+              body = [
+                MARKER,
+                'No required gate member is failing on `main`, but ' +
+                  `${unknown.length} ${unknown.length === 1 ? 'has' : 'have'} no conclusive ` +
+                  '`main` run, so this issue is held open rather than closed:',
+                '',
+                unknownLanes,
+                '',
+                'A member reads as unknown when it has never concluded on `main` -- a newly ' +
+                  'added lane, or one whose last run predates the window this sweep reads. ' +
+                  'This closes itself once every member has reported green.',
+                '',
+                footer,
+              ].join('\n');
+            }
 
             if (tracking) {
               // Rewritten rather than commented on: a sweep every half hour
               // would otherwise bury the issue it exists to make readable.
               if (tracking.title === title && tracking.body === body) {
-                core.info(`#${tracking.number}: unchanged, still red`);
+                core.info(`#${tracking.number}: unchanged, still open`);
                 return;
               }
               await github.rest.issues.update({
                 ...context.repo, issue_number: tracking.number, title, body,
               });
-              core.info(`#${tracking.number}: updated, ${failed.length} failing`);
+              core.info(
+                `#${tracking.number}: updated, ${failed.length} failing, ${unknown.length} unknown`,
+              );
               return;
             }
 
