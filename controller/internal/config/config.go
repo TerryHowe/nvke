@@ -530,7 +530,7 @@ type TeleportConfig struct {
 	TokenNamePrefix string `controllerconfig:"teleport.tokenNamePrefix"`
 
 	// ResourceGroupLabelValue is the value of the Teleport "resource-group"
-	// label stamped on tokens and node userdata. Existing sites pin "nke".
+	// label stamped on tokens and node userdata. Earlier charts stamped "nke".
 	ResourceGroupLabelValue string `controllerconfig:"teleport.resourceGroupLabelValue"`
 }
 

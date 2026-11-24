@@ -842,9 +842,9 @@ teleport:
   # -- Name of the Kubernetes secret containing the tbot identity (written by tbot output)
   identitySecretName: "cloud-workflow-engine-teleport"
   # -- Value of the Teleport "managed-by" label this controller stamps on
-  # tokens it creates. An existing site pins its old value
-  # ("nke-cloud-workflow-engine"), or moves it and lists the old one under
-  # acceptedManagedByLabelValues below.
+  # tokens it creates. Leave it at the default: a site that ran an earlier
+  # chart lists its old value under acceptedManagedByLabelValues below rather
+  # than pinning it here.
   managedByLabelValue: "nvke-controller"
   # -- Further "managed-by" values this controller still owns without writing.
   # Tokens are labelled at mint and nodes at join, and neither is ever
@@ -855,10 +855,13 @@ teleport:
   # "nke-cloud-workflow-engine" and, if it pinned one of its own, that pin too.
   acceptedManagedByLabelValues: []
   # -- Prefix for the deterministic Teleport TPM join token name this
-  # controller mints for a node. An existing site pins "nke-cwe-".
+  # controller mints for a node. Safe to change: tokens expire after 2h, so
+  # names minted under an earlier prefix (such as "nke-cwe-") age out.
   tokenNamePrefix: "nvke-controller-"
   # -- Value of the Teleport "resource-group" label stamped on the tokens and
-  # node userdata this controller creates. An existing site pins "nke".
+  # node userdata this controller creates. Teleport roles and tsh filters
+  # select nodes by it, so they must accept a new value before it changes.
+  # Earlier charts stamped "nke".
   resourceGroupLabelValue: "nvke"
 
 # Read-only credential inventory is independent of automated renewal.
